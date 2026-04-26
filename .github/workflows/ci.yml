@@ -74,7 +74,7 @@ jobs:
           uv run --locked pip-audit -r .audit-requirements.txt --no-deps --disable-pip --skip-editable --ignore-vuln GHSA-58qw-9mgm-455v --format cyclonedx-json --output sbom.cdx.json
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-${{ matrix.os }}-${{ matrix.python-version }}
           path: sbom.cdx.json
