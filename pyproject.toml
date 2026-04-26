@@ -48,7 +48,7 @@ Changelog = "https://github.com/joshkeldam/databento-stream-downloader/blob/main
 dev = [
   "basedpyright==1.39.3",
   "boto3-stubs[s3]==1.42.96",
-  "hypothesis==6.148.2",
+  "hypothesis==6.152.2",
   "moto[s3]==5.1.22",
   "pip-audit==2.9.0",
   "pre-commit==4.5.0",
