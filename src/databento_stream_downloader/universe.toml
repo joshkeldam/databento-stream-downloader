@@ -1,0 +1,83 @@
+# Default CME futures parent-symbol universe.
+# Keep this file reviewed and version controlled; products can list and retire.
+symbols = [
+  "ES.FUT",
+  "NQ.FUT",
+  "RTY.FUT",
+  "YM.FUT",
+  "MES.FUT",
+  "MNQ.FUT",
+  "M2K.FUT",
+  "MYM.FUT",
+  "6E.FUT",
+  "6J.FUT",
+  "6B.FUT",
+  "6A.FUT",
+  "6C.FUT",
+  "6S.FUT",
+  "6M.FUT",
+  "6N.FUT",
+  "ZT.FUT",
+  "ZF.FUT",
+  "ZN.FUT",
+  "TN.FUT",
+  "ZB.FUT",
+  "UB.FUT",
+  "SR3.FUT",
+  "SR1.FUT",
+  "ZQ.FUT",
+  "MTN.FUT",
+  "MWN.FUT",
+  "CL.FUT",
+  "MCL.FUT",
+  "QM.FUT",
+  "NG.FUT",
+  "QG.FUT",
+  "RB.FUT",
+  "HO.FUT",
+  "BZ.FUT",
+  "GC.FUT",
+  "MGC.FUT",
+  "SI.FUT",
+  "SIL.FUT",
+  "HG.FUT",
+  "PL.FUT",
+  "PA.FUT",
+  "ZC.FUT",
+  "ZS.FUT",
+  "ZW.FUT",
+  "ZM.FUT",
+  "ZL.FUT",
+  "KE.FUT",
+  "LE.FUT",
+  "HE.FUT",
+  "GF.FUT",
+  "BTC.FUT",
+  "MBT.FUT",
+  "ETH.FUT",
+  "MET.FUT",
+  "SOL.FUT",
+  "XRP.FUT",
+]
+
+# First data UTC days are used to clip default-universe requests so broad
+# historical runs do not materialize pre-data no-data coverage. These are the
+# first UTC calendar days expected to contain Databento records, not local
+# exchange launch dates. CME Sunday-evening CT launches often map to Monday UTC.
+[first_data_utc]
+"BTC.FUT" = "2017-12-18"
+"TN.FUT" = "2016-01-11"
+"SR3.FUT" = "2018-05-07"
+"MES.FUT" = "2019-05-06"
+"MNQ.FUT" = "2019-05-06"
+"M2K.FUT" = "2019-05-06"
+"MYM.FUT" = "2019-05-06"
+"ETH.FUT" = "2021-02-08"
+"MBT.FUT" = "2021-05-03"
+"MCL.FUT" = "2021-07-12"
+"MET.FUT" = "2021-12-06"
+"SR1.FUT" = "2022-01-10"
+"MTN.FUT" = "2024-03-25"
+"MWN.FUT" = "2024-03-25"
+"SOL.FUT" = "2025-03-17"
+"XRP.FUT" = "2025-05-19"
