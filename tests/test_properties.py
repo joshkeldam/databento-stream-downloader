@@ -7,9 +7,10 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from databento_stream_downloader.dbn import validate_dbn_metadata
@@ -19,13 +20,30 @@ from databento_stream_downloader.pricing import (
     decimal_dollars_to_cents,
     dollars_to_decimal,
 )
-from databento_stream_downloader.runner import WorkItem, _cost_ranges
+from databento_stream_downloader.runner import (
+    WorkItem,
+    _allocate_estimated_values,
+    _cost_ranges,
+    _read_sha256_sidecar,
+    _sha256_file,
+    _universe_semantic_sha256,
+    _validate_sha256_sidecar,
+    _write_sha256_sidecar,
+)
+
+_BASE_DAY = date(2026, 1, 1)
+
+
+def _work_items_for_offsets(offsets: list[int]) -> list[WorkItem]:
+    return [
+        WorkItem(symbol="ES.FUT", schema="mbo", day=_BASE_DAY + timedelta(days=offset))
+        for offset in offsets
+    ]
 
 
 @given(st.lists(st.integers(min_value=0, max_value=365), min_size=1, max_size=40))
 def test_cost_ranges_cover_exact_input_days(offsets: list[int]) -> None:
-    base = date(2026, 1, 1)
-    days = {base + timedelta(days=offset) for offset in offsets}
+    days = {_BASE_DAY + timedelta(days=offset) for offset in offsets}
     work = [WorkItem(symbol="ES.FUT", schema="mbo", day=day) for day in days]
 
     covered: set[date] = set()
@@ -36,6 +54,135 @@ def test_cost_ranges_cover_exact_input_days(offsets: list[int]) -> None:
             day += timedelta(days=1)
 
     assert covered == days
+
+
+@given(
+    count=st.integers(min_value=1, max_value=80),
+    total=st.integers(min_value=0, max_value=10_000),
+)
+def test_allocate_estimated_values_conserves_total_and_balances_items(
+    count: int,
+    total: int,
+) -> None:
+    work = _work_items_for_offsets(list(range(count)))
+
+    allocation = _allocate_estimated_values(work, {("ES.FUT", "mbo"): total})
+    values = list(allocation.values())
+
+    assert set(allocation) == set(work)
+    assert sum(values) == total
+    assert max(values) - min(values) <= 1
+
+
+@given(st.integers(min_value=1, max_value=80))
+def test_cost_ranges_collapse_contiguous_days(length: int) -> None:
+    work = _work_items_for_offsets(list(range(length)))
+
+    assert _cost_ranges(work) == [
+        ("ES.FUT", "mbo", _BASE_DAY, _BASE_DAY + timedelta(days=length))
+    ]
+
+
+@given(
+    st.lists(
+        st.integers(min_value=0, max_value=365),
+        min_size=1,
+        max_size=80,
+        unique=True,
+    )
+)
+def test_cost_ranges_split_exactly_at_gaps(offsets: list[int]) -> None:
+    sorted_offsets = sorted(offsets)
+    work = _work_items_for_offsets(sorted_offsets)
+
+    expected: list[tuple[str, str, date, date]] = []
+    start_offset = sorted_offsets[0]
+    previous_offset = start_offset
+    for offset in sorted_offsets[1:]:
+        if offset == previous_offset + 1:
+            previous_offset = offset
+            continue
+        expected.append(
+            (
+                "ES.FUT",
+                "mbo",
+                _BASE_DAY + timedelta(days=start_offset),
+                _BASE_DAY + timedelta(days=previous_offset + 1),
+            )
+        )
+        start_offset = offset
+        previous_offset = offset
+    expected.append(
+        (
+            "ES.FUT",
+            "mbo",
+            _BASE_DAY + timedelta(days=start_offset),
+            _BASE_DAY + timedelta(days=previous_offset + 1),
+        )
+    )
+
+    ranges = _cost_ranges(work)
+
+    assert ranges == expected
+    for _symbol, _schema, start, end in ranges:
+        assert start < end
+        assert end == max(
+            day + timedelta(days=1) for item in work if start <= (day := item.day) < end
+        )
+
+
+@given(
+    st.lists(
+        st.sampled_from(["ES.FUT", "NQ.FUT", "CL.FUT", "GC.FUT", "ZN.FUT"]),
+        min_size=1,
+        max_size=5,
+        unique=True,
+    ),
+    st.permutations(["BTC.FUT", "ETH.FUT", "SOL.FUT"]),
+)
+def test_universe_semantic_hash_is_stable_under_symbol_order(
+    symbols: list[str],
+    ordered_first_data_symbols: tuple[str, ...],
+) -> None:
+    first_data = {
+        symbol: _BASE_DAY + timedelta(days=index)
+        for index, symbol in enumerate(ordered_first_data_symbols)
+    }
+    with (
+        patch(
+            "databento_stream_downloader._runner.ledger.load_first_data_utc_dates",
+            return_value=first_data,
+        ),
+        patch(
+            "databento_stream_downloader._runner.ledger.load_default_symbols",
+            return_value=tuple(symbols),
+        ),
+    ):
+        first_hash = _universe_semantic_sha256()
+    with (
+        patch(
+            "databento_stream_downloader._runner.ledger.load_first_data_utc_dates",
+            return_value=first_data,
+        ),
+        patch(
+            "databento_stream_downloader._runner.ledger.load_default_symbols",
+            return_value=tuple(reversed(symbols)),
+        ),
+    ):
+        assert _universe_semantic_sha256() == first_hash
+
+
+@settings(max_examples=30)
+@given(st.binary(min_size=0, max_size=4096))
+def test_sha256_sidecar_round_trip_validates_any_file_payload(payload: bytes) -> None:
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "payload.dbn.zst"
+        path.write_bytes(payload)
+
+        _write_sha256_sidecar(path)
+
+        assert _read_sha256_sidecar(path) == _sha256_file(path)
+        _validate_sha256_sidecar(path)
 
 
 @given(st.decimals(min_value=0, max_value=10_000, places=4, allow_nan=False))

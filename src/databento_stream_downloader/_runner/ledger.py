@@ -190,7 +190,7 @@ def _universe_semantic_sha256() -> str:
         for symbol, value in sorted(load_first_data_utc_dates().items())
     }
     payload = {
-        "symbols": list(load_default_symbols()),
+        "symbols": sorted(load_default_symbols()),
         "first_data_utc": first_data_utc,
     }
     return hashlib.sha256(

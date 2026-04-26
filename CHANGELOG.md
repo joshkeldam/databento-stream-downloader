@@ -31,6 +31,8 @@ for repository tags even though it is intended to be cloned and run locally.
   review trigger in both local and CI quality gates.
 - Test coverage gates now require 92% global coverage plus explicit per-file
   floors for `cli.py` and `databento_client.py`.
+- Property tests now cover cost allocation invariants, cost-range gap handling,
+  universe semantic hash ordering, and SHA256 sidecar round trips.
 
 ## [0.2.0] - 2026-04-26
 
