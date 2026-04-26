@@ -86,6 +86,7 @@ jobs:
         run: uv build
 
       - name: Smoke test wheel
+        shell: bash
         run: |
           python - <<'PY'
           import os
