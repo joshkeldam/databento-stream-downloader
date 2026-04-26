@@ -81,7 +81,14 @@ def run_download_with_client(
     console: Console,
     error_console: Console | None = None,
 ) -> None:
-    """Run the downloader with an injected client implementation."""
+    """Run the downloader with an injected client implementation.
+
+    The caller owns console routing. Pass ``console`` for human plan/progress
+    output and an optional ``error_console`` for refusals, failures, and
+    interruption messages. When ``error_console`` is omitted, the runner creates
+    a stderr console so safety-critical output does not share stdout with normal
+    human output.
+    """
     _run_download(config, client, console, error_console)
 
 
