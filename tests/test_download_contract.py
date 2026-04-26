@@ -1207,7 +1207,10 @@ def test_run_download_writes_ledger_and_sha256_sidecar(tmp_path: Path) -> None:
     assert record["package_version"]
     assert record["retry_count_total"] == 0
     assert record["retry_count_by_operation"] == {}
-    assert record["directory_fsync_skipped_count"] == 0
+    if os.name == "nt":
+        assert record["directory_fsync_skipped_count"] > 0
+    else:
+        assert record["directory_fsync_skipped_count"] == 0
 
 
 def test_run_download_persists_directory_fsync_skipped_count(
