@@ -319,7 +319,9 @@ Trusted Publishing, Sigstore signing, and GitHub provenance attestations.
 
 Dependency versions are exact in `pyproject.toml` by design. This repository is
 intended to be cloned and run with the committed `uv.lock`, not imported as a
-library dependency with flexible transitive constraints.
+library dependency with flexible transitive constraints. Dependabot is scheduled
+monthly rather than weekly so dependency refreshes are deliberate maintenance
+events that update both `pyproject.toml` and `uv.lock` together.
 
 The Python import surface is intentionally small: configuration, error types,
 logging setup, default-symbol loading, and `run_download` entry points are

@@ -20,7 +20,9 @@ behavior.
 
 Dependency pins in `pyproject.toml` are exact on purpose. This is a clone-and-run
 CLI with a committed `uv.lock`; dependency update PRs should change both files
-and pass the full quality gate.
+and pass the full quality gate. Automated dependency PRs run monthly, not
+weekly, to keep dependency refreshes reviewable instead of creating routine
+version churn.
 
 ## Test Expectations
 

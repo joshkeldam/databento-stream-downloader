@@ -25,6 +25,8 @@ for repository tags even though it is intended to be cloned and run locally.
   Windows remote drives, and detection-unavailable cases emit a visible warning.
 - Failed partition rows are now routed consistently to stderr through the error
   console in both quiet and non-quiet runs.
+- Dependabot now runs monthly for Python and GitHub Actions dependencies to
+  match the repository's exact-pin, clone-and-run dependency policy.
 
 ## [0.2.0] - 2026-04-26
 
