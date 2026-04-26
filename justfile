@@ -27,6 +27,9 @@ test-cov:
 
 audit:
   uv export --format requirements-txt --locked --no-hashes --no-dev --output-file .audit-requirements.txt
+  # why: GHSA-58qw-9mgm-455v / CVE-2026-3219 is a pip archive-type
+  # ambiguity advisory with no patched version available as of 2026-04-26.
+  # Re-evaluate by 2026-05-31 or immediately when a patched pip is released.
   uv run --locked pip-audit -r .audit-requirements.txt --no-deps --disable-pip --skip-editable --ignore-vuln GHSA-58qw-9mgm-455v
 
 pre-commit:

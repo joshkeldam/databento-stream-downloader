@@ -27,6 +27,8 @@ for repository tags even though it is intended to be cloned and run locally.
   console in both quiet and non-quiet runs.
 - Dependabot now runs monthly for Python and GitHub Actions dependencies to
   match the repository's exact-pin, clone-and-run dependency policy.
+- The temporary pip audit suppression now documents its advisory rationale and
+  review trigger in both local and CI quality gates.
 
 ## [0.2.0] - 2026-04-26
 
