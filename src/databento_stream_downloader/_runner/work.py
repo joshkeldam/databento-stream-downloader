@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from datetime import date, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from databento_stream_downloader.constants import RAW_PREFIX
 from databento_stream_downloader.symbols import load_first_data_utc_dates
 
 LOGGER = structlog.get_logger(__name__)
+_CANONICAL_DBN_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.dbn\.zst$")
 
 
 def _work_items_from_all(
@@ -61,7 +63,7 @@ def _existing_items(config: DownloadConfig) -> set[WorkItem]:
                 continue
             for path in directory.iterdir():
                 _warn_if_suspicious_archive_file(path)
-                if not path.name.endswith(".dbn.zst"):
+                if _CANONICAL_DBN_NAME_RE.fullmatch(path.name) is None:
                     continue
                 try:
                     day = date.fromisoformat(path.name.removesuffix(".dbn.zst"))
@@ -81,7 +83,7 @@ def _warn_if_suspicious_archive_file(path: Path) -> None:
     name = path.name
     if (
         ".dbn.zst" in name
-        and not name.endswith(".dbn.zst")
+        and _CANONICAL_DBN_NAME_RE.fullmatch(name) is None
         and not name.endswith(".dbn.zst.sha256")
         and not name.endswith(".tmp")
         and not name.startswith(".")

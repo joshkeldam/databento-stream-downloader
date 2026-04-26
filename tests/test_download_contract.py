@@ -1702,6 +1702,8 @@ def test_existing_items_ignores_unparseable_and_tmp_names(
     (directory / ".2026-04-02.dbn.zst.tmp").write_bytes(b"tmp")
     (directory / "2026-04-03.dbn.zst.tmp").write_bytes(b"tmp")
     (directory / "2026-04-03.dbn.zst.bak").write_bytes(b"backup")
+    (directory / "2026-04-02.dbn.zst.dbn.zst").write_bytes(b"double suffix")
+    (directory / "not-a-date.dbn.zst.dbn.zst").write_bytes(b"double suffix")
     iterdir_calls = 0
     original_iterdir = Path.iterdir
 
@@ -1717,12 +1719,38 @@ def test_existing_items_ignores_unparseable_and_tmp_names(
 
     assert existing == {WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))}
     assert iterdir_calls == 1
-    assert events == [
+    assert {(event, kwargs["path"]) for event, kwargs in events} == {
         (
             "suspicious_archive_file_ignored",
-            {"path": str(directory / "2026-04-03.dbn.zst.bak")},
-        )
-    ]
+            str(directory / "2026-04-03.dbn.zst.bak"),
+        ),
+        (
+            "suspicious_archive_file_ignored",
+            str(directory / "not-a-date.dbn.zst"),
+        ),
+        (
+            "suspicious_archive_file_ignored",
+            str(directory / "2026-04-02.dbn.zst.dbn.zst"),
+        ),
+        (
+            "suspicious_archive_file_ignored",
+            str(directory / "not-a-date.dbn.zst.dbn.zst"),
+        ),
+    }
+
+
+def test_canonical_dbn_name_regex_is_strict() -> None:
+    assert (
+        runner_work._CANONICAL_DBN_NAME_RE.fullmatch("2026-04-01.dbn.zst") is not None
+    )
+    assert (
+        runner_work._CANONICAL_DBN_NAME_RE.fullmatch("2026-04-01.dbn.zst.dbn.zst")
+        is None
+    )
+    assert runner_work._CANONICAL_DBN_NAME_RE.fullmatch("not-a-date.dbn.zst") is None
+    assert (
+        runner_work._CANONICAL_DBN_NAME_RE.fullmatch(".2026-04-01.dbn.zst.tmp") is None
+    )
 
 
 def test_total_estimated_cents_rounds_aggregate_decimal_once() -> None:
