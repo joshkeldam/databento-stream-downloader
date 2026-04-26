@@ -52,6 +52,7 @@ from databento_stream_downloader.runner import (
     DownloaderClient,
     WorkItem,
     _allocate_estimated_values,
+    _bucket_cost_warn_threshold_cents,
     _bytes,
     _check_bucket_cost_caps,
     _check_cost_cap,
@@ -885,6 +886,11 @@ def test_bucket_cost_cap_warns_on_large_global_cap_fraction(tmp_path: Path) -> N
     _check_bucket_cost_caps(config, estimates, console)
 
     assert "exceeds 25%" in console.export_text()
+
+
+def test_bucket_cost_warn_threshold_uses_cents_internally() -> None:
+    assert _bucket_cost_warn_threshold_cents(1000) == 250
+    assert _bucket_cost_warn_threshold_cents(999) == 249
 
 
 def test_in_flight_planning_exposure_warns_before_streaming(tmp_path: Path) -> None:

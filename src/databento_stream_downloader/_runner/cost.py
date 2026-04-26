@@ -88,10 +88,8 @@ def _check_bucket_cost_caps(
                 )
                 raise SystemExit(2)
             continue
-        warn_threshold = (
-            Decimal(config.max_cost_cents) / Decimal(100) * _BUCKET_COST_WARN_FRACTION
-        )
-        if estimate.cost_dollars > warn_threshold:
+        warn_threshold_cents = _bucket_cost_warn_threshold_cents(config.max_cost_cents)
+        if estimate.cost_cents > warn_threshold_cents:
             console.print(
                 "[yellow]Warning:[/yellow] estimated bucket cost exceeds 25% "
                 f"of global planning cap: bucket={label}, "
@@ -297,10 +295,15 @@ def _total_estimated_cents(estimates: list[CostEstimate]) -> int:
     )
 
 
+def _bucket_cost_warn_threshold_cents(max_cost_cents: int) -> int:
+    return int(Decimal(max_cost_cents) * _BUCKET_COST_WARN_FRACTION)
+
+
 __all__ = [
     "_allocate_estimated_billable_bytes",
     "_allocate_estimated_cost_cents",
     "_allocate_estimated_values",
+    "_bucket_cost_warn_threshold_cents",
     "_check_bucket_cost_caps",
     "_check_cost_cap",
     "_check_disk_space",
