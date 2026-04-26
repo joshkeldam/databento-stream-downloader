@@ -344,7 +344,7 @@ def main() -> None:
         error_console.print(f"[bold red]Config:[/bold red] {exc}")
         raise SystemExit(2) from exc
     api_key = settings.api_key
-    if not api_key and not config.validate_only:
+    if config.requires_api_key and not api_key:
         error_console.print(
             "[bold red]Config:[/bold red] DATABENTO_API_KEY is not configured"
         )

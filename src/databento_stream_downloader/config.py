@@ -49,6 +49,11 @@ class DownloadConfig(BaseModel):
     show_retries: bool = False
     yes: bool = False
 
+    @property
+    def requires_api_key(self) -> bool:
+        """Whether this run mode needs Databento API credentials."""
+        return not self.validate_only
+
     @field_validator("symbols")
     @classmethod
     def _validate_symbols(cls, symbols: tuple[str, ...]) -> tuple[str, ...]:

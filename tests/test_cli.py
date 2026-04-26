@@ -218,6 +218,50 @@ def test_main_missing_api_key_prints_compact_error(
     assert "usage:" not in captured.err
 
 
+def test_main_allows_validate_only_without_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "load_dotenv", _skip_dotenv)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "databento-stream-downloader",
+            "--symbol",
+            "ES.FUT",
+            "--schemas",
+            "definition",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--data-dir",
+            str(tmp_path),
+            "--validate-only",
+        ],
+    )
+    seen: dict[str, object] = {}
+
+    def fake_run_download(
+        config: DownloadConfig,
+        api_key: str,
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        seen["config"] = config
+        seen["api_key"] = api_key
+
+    monkeypatch.setattr(cli, "run_download", fake_run_download)
+
+    cli.main()
+
+    config = cast("DownloadConfig", seen["config"])
+    assert config.requires_api_key is False
+    assert seen["api_key"] == ""
+
+
 def test_json_quiet_routes_machine_logs_to_stderr_only(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

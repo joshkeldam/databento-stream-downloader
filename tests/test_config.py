@@ -111,6 +111,22 @@ def test_download_config_validates() -> None:
     )
 
     assert config.symbols == ("ES.FUT",)
+    assert config.requires_api_key is True
+
+
+def test_download_config_requires_api_key_except_validate_only(tmp_path: Path) -> None:
+    execute_config = DownloadConfig(
+        data_dir=tmp_path,
+        symbols=("ES.FUT",),
+        schemas=("mbo",),
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 1),
+        mode=RunMode.EXECUTE,
+    )
+    validate_only_config = execute_config.model_copy(update={"validate_only": True})
+
+    assert execute_config.requires_api_key is True
+    assert validate_only_config.requires_api_key is False
 
 
 def test_download_config_normalizes_lowercase_symbols() -> None:
