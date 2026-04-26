@@ -12,11 +12,13 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from databento_stream_downloader.databento_client import _float_to_decimal_dollars
 from databento_stream_downloader.dbn import validate_dbn_metadata
 from databento_stream_downloader.errors import ValidationError
 from databento_stream_downloader.models import StreamQuery
-from databento_stream_downloader.pricing import decimal_dollars_to_cents
+from databento_stream_downloader.pricing import (
+    decimal_dollars_to_cents,
+    dollars_to_decimal,
+)
 from databento_stream_downloader.runner import WorkItem, _cost_ranges
 
 
@@ -46,7 +48,7 @@ def test_cost_estimate_conversion_matches_decimal_half_up(value: Decimal) -> Non
         )
     )
 
-    assert decimal_dollars_to_cents(_float_to_decimal_dollars(as_float)) == expected
+    assert decimal_dollars_to_cents(dollars_to_decimal(as_float)) == expected
 
 
 @given(st.binary(min_size=0, max_size=256))

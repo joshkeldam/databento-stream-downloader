@@ -10,7 +10,6 @@ import warnings
 from collections.abc import Callable
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
-from math import isfinite
 from pathlib import Path
 from random import uniform
 from typing import Never, TypeVar
@@ -32,6 +31,7 @@ from databento_stream_downloader.errors import (
     RetryableError,
 )
 from databento_stream_downloader.models import CostQuery, StreamQuery
+from databento_stream_downloader.pricing import dollars_to_decimal
 
 _T = TypeVar("_T")
 LOGGER = structlog.get_logger(__name__)
@@ -112,7 +112,7 @@ class DatabentoClient:
             return _raise_classified(exc)
         except BentoError as exc:
             raise FatalAPIError(str(exc)) from exc
-        return _float_to_decimal_dollars(cost)
+        return dollars_to_decimal(cost)
 
     def estimate_size(self, query: CostQuery) -> int:
         client = self._client()
@@ -263,26 +263,6 @@ class _ThreadState(threading.local):
     def __init__(self) -> None:
         super().__init__()
         self.client: databento.Historical | None = None
-
-
-def _float_to_decimal_dollars(value: float | Decimal | str) -> Decimal:
-    if isinstance(value, Decimal):
-        decimal_value = value
-    elif isinstance(value, str):
-        try:
-            decimal_value = Decimal(value)
-        except Exception as exc:
-            msg = f"invalid Databento cost estimate: {value!r}"
-            raise FatalAPIError(msg) from exc
-    else:
-        if not isinstance(value, float) or not isfinite(value):
-            msg = f"invalid Databento cost estimate: {value!r}"
-            raise FatalAPIError(msg)
-        decimal_value = Decimal(str(value))
-    if decimal_value.is_nan() or decimal_value.is_infinite() or decimal_value < 0:
-        msg = f"invalid Databento cost estimate: {value!r}"
-        raise FatalAPIError(msg)
-    return decimal_value
 
 
 def _logged_retry_delay(

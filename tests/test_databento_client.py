@@ -24,13 +24,16 @@ from databento_stream_downloader.databento_client import (
     DatabentoClient,
     _apply_sdk_timeout,
     _call_with_sdk_warning_scope,
-    _float_to_decimal_dollars,
     _is_semantic_no_data_422,
     _raise_classified,
     _retry_after_seconds,
 )
 from databento_stream_downloader.errors import DegradedError, FatalError, RetryableError
 from databento_stream_downloader.models import CostQuery, StreamQuery
+from databento_stream_downloader.pricing import (
+    decimal_dollars_to_cents,
+    dollars_to_decimal,
+)
 
 
 def _client(*, sleeps: list[float]) -> DatabentoClient:
@@ -62,19 +65,17 @@ def test_no_data_bento_warning_is_suppressed_only_in_sdk_warning_scope() -> None
 
 
 def test_cost_estimate_conversion_rounds_half_up() -> None:
-    from databento_stream_downloader.pricing import decimal_dollars_to_cents
-
-    assert decimal_dollars_to_cents(_float_to_decimal_dollars(0.0)) == 0
-    assert decimal_dollars_to_cents(_float_to_decimal_dollars(0.004)) == 0
-    assert decimal_dollars_to_cents(_float_to_decimal_dollars(0.005)) == 1
-    assert decimal_dollars_to_cents(_float_to_decimal_dollars(12.345)) == 1235
-    assert decimal_dollars_to_cents(_float_to_decimal_dollars("12.345")) == 1235
+    assert decimal_dollars_to_cents(dollars_to_decimal(0.0)) == 0
+    assert decimal_dollars_to_cents(dollars_to_decimal(0.004)) == 0
+    assert decimal_dollars_to_cents(dollars_to_decimal(0.005)) == 1
+    assert decimal_dollars_to_cents(dollars_to_decimal(12.345)) == 1235
+    assert decimal_dollars_to_cents(dollars_to_decimal("12.345")) == 1235
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.01])
 def test_cost_estimate_conversion_rejects_invalid_values(value: float) -> None:
     with pytest.raises(FatalError, match="invalid Databento cost estimate"):
-        _float_to_decimal_dollars(value)
+        dollars_to_decimal(value)
 
 
 def test_retry_exhaustion_uses_backoff_without_final_sleep() -> None:
