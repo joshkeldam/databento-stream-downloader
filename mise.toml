@@ -1,5 +1,5 @@
 [tools]
 just = "1.50.0"
-# Local development pins the latest released 3.13 patch. CI also runs Python 3.14.
-python = "3.13.13"
+# Local development and CI both pin this Python patch for repeatability.
+python = "3.14.4"
 uv = "0.11.1"
