@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import date, timedelta
+from threading import Lock
 
 import structlog
-from rich.console import Console
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
 from rich.progress import (
     BarColumn,
+    MofNCompleteColumn,
     Progress,
     SpinnerColumn,
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
+from rich.table import Table
+from rich.text import Text
 
 from databento_stream_downloader._runner.concurrency import _cancel_futures
 from databento_stream_downloader._runner.format import _money
@@ -24,6 +32,7 @@ from databento_stream_downloader._runner.types import (
     DownloadOutcome,
     WorkItem,
     _DirectoryFsyncTracker,
+    _InFlightTracker,
 )
 from databento_stream_downloader._runner.validation import (
     _raise_on_suspicious_all_no_data,
@@ -45,6 +54,96 @@ from databento_stream_downloader.models import DownloadResult, StreamQuery
 from databento_stream_downloader.paths import canonical_path
 
 LOGGER = structlog.get_logger(__name__)
+_IN_FLIGHT_DISPLAY_LIMIT = 8
+
+
+@dataclass(slots=True)
+class _OutcomeCounts:
+    placed: int = 0
+    no_data: int = 0
+    failed: int = 0
+    _lock: Lock = field(default_factory=Lock)
+
+    def record(self, outcome: DownloadOutcome) -> None:
+        with self._lock:
+            if outcome == "placed":
+                self.placed += 1
+            elif outcome == "no_data":
+                self.no_data += 1
+            elif outcome == "failed":
+                self.failed += 1
+
+    def snapshot(self) -> tuple[int, int, int]:
+        with self._lock:
+            return (self.placed, self.no_data, self.failed)
+
+
+def _render_progress_panel(
+    progress: Progress,
+    tracker: _InFlightTracker,
+    counts: _OutcomeCounts,
+    max_workers: int,
+) -> Panel:
+    placed, no_data, failed = counts.snapshot()
+    in_flight = tracker.snapshot()
+    active_count = len(in_flight)
+
+    activity = Table.grid(padding=(0, 1))
+    activity.add_column(no_wrap=True)
+    if in_flight:
+        for item in in_flight[:_IN_FLIGHT_DISPLAY_LIMIT]:
+            activity.add_row(
+                Text.assemble(
+                    ("▸ ", "dim"),
+                    (f"{item.symbol}/{item.schema}", "cyan"),
+                    "  ",
+                    (item.day.isoformat(), "white"),
+                ),
+            )
+        remaining = active_count - _IN_FLIGHT_DISPLAY_LIMIT
+        if remaining > 0:
+            activity.add_row(Text(f"… and {remaining} more", style="dim italic"))
+    else:
+        activity.add_row(Text("(idle)", style="dim italic"))
+
+    counts_line = Text.assemble(
+        ("✓ ", "green"),
+        (f"{placed:,} placed", "green"),
+        ("    ⊘ ", "yellow"),
+        (f"{no_data:,} no_data", "yellow"),
+        ("    ✗ ", "red bold" if failed else "red"),
+        (f"{failed:,} failed", "red bold" if failed else "red"),
+    )
+    workers_line = Text.assemble(
+        ("Workers ", "dim"),
+        (f"{active_count}", "bold"),
+        (f" / {max_workers} active", "dim"),
+    )
+
+    return Panel(
+        Group(progress, Text(""), workers_line, activity, Text(""), counts_line),
+        title="[bold]Databento stream download[/bold]",
+        border_style="cyan",
+        padding=(1, 2),
+    )
+
+
+def _build_progress(quiet: bool, console: Console) -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=None),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(compact=True, elapsed_when_finished=True),
+        console=console,
+        transient=False,
+        expand=True,
+        disable=quiet,
+    )
 
 
 def _stream_missing(
@@ -66,14 +165,11 @@ def _stream_missing(
     landed_estimated_bytes = 0
     failure_console = error_console or Console(stderr=True)
 
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        TimeElapsedColumn(),
-        console=console,
-    )
+    quiet = bool(getattr(console, "quiet", False))
+    progress = _build_progress(quiet, console)
+    in_flight_tracker = _InFlightTracker()
+    counts = _OutcomeCounts()
+
     pool = ThreadPoolExecutor(max_workers=config.max_workers)
     futures: list[Future[tuple[DownloadOutcome, str]]] = []
     future_items: dict[Future[tuple[DownloadOutcome, str]], WorkItem] = {}
@@ -84,8 +180,24 @@ def _stream_missing(
         work_days_by_key.setdefault(key, set()).add(item.day)
     fatal = False
     interrupted = False
+    live: Live | None = None
+    if not quiet:
+        live = Live(
+            _render_progress_panel(
+                progress,
+                in_flight_tracker,
+                counts,
+                config.max_workers,
+            ),
+            console=console,
+            refresh_per_second=8,
+            transient=False,
+        )
     try:
-        progress.start()
+        if live is not None:
+            live.start()
+        else:
+            progress.start()
         task = progress.add_task("Downloading", total=len(work))
         futures = [
             pool.submit(
@@ -95,6 +207,7 @@ def _stream_missing(
                 item,
                 (estimated_bytes_by_item or {}).get(item),
                 fsync_tracker,
+                in_flight_tracker,
             )
             for item in work
         ]
@@ -113,6 +226,7 @@ def _stream_missing(
                 pool.shutdown(wait=False, cancel_futures=True)
                 raise
             item = future_items[future]
+            counts.record(outcome)
             if outcome == "placed":
                 placed += 1
             elif outcome == "cached":
@@ -158,6 +272,15 @@ def _stream_missing(
             )
             completed_work += 1
             progress.advance(task)
+            if live is not None:
+                live.update(
+                    _render_progress_panel(
+                        progress,
+                        in_flight_tracker,
+                        counts,
+                        config.max_workers,
+                    ),
+                )
     except (KeyboardInterrupt, ShutdownRequestedError) as exc:
         interrupted = True
         _cancel_futures(futures)
@@ -166,7 +289,10 @@ def _stream_missing(
             raise
         raise InterruptedDownloadError("download interrupted by user") from exc
     finally:
-        progress.stop()
+        if live is not None:
+            live.stop()
+        else:
+            progress.stop()
         if fatal or interrupted:
             pool.shutdown(wait=False, cancel_futures=True)
         else:
@@ -210,6 +336,7 @@ def _stream_one(
     item: WorkItem,
     estimated_billable_bytes: int | None = None,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
+    in_flight: _InFlightTracker | None = None,
 ) -> tuple[DownloadOutcome, str]:
     day = item.day
     dest = canonical_path(config.data_dir, item.symbol, item.schema, day)
@@ -225,49 +352,82 @@ def _stream_one(
         start=day,
         end=day + timedelta(days=1),
     )
+    token = in_flight.add(item) if in_flight is not None else None
     try:
-        client.stream_to_file(query, tmp)
-        validate_dbn_metadata(
-            query,
-            tmp,
-            deep=config.deep_validate,
-            strict=config.strict_validate,
-            max_decompressed_bytes=_deep_validate_cap(estimated_billable_bytes),
-        )
-        digest = _place_tmp(tmp, dest, fsync_tracker)
-        _write_sha256_sidecar(dest, digest, fsync_tracker)
-        return ("placed", label)
-    except DegradedError:
         try:
-            client.write_empty_file(query, tmp)
-            validate_dbn_metadata(
-                query,
+            client.stream_to_file(query, tmp)
+            if config.validate_on_write:
+                validate_dbn_metadata(
+                    query,
+                    tmp,
+                    deep=config.deep_validate,
+                    strict=config.strict_validate,
+                    max_decompressed_bytes=_deep_validate_cap(estimated_billable_bytes),
+                )
+            digest = _place_tmp(
                 tmp,
-                deep=config.deep_validate,
-                strict=config.strict_validate,
-                max_decompressed_bytes=_deep_validate_cap(estimated_billable_bytes),
+                dest,
+                fsync_tracker,
+                fsync_writes=config.fsync_writes,
+                compute_digest=config.write_sidecars,
             )
-            digest = _place_tmp(tmp, dest, fsync_tracker)
-            _write_sha256_sidecar(dest, digest, fsync_tracker)
-            return ("no_data", label)
+            if config.write_sidecars:
+                _write_sha256_sidecar(
+                    dest,
+                    digest,
+                    fsync_tracker,
+                    fsync_writes=config.fsync_writes,
+                )
+            return ("placed", label)
+        except DegradedError:
+            try:
+                client.write_empty_file(query, tmp)
+                if config.validate_on_write:
+                    validate_dbn_metadata(
+                        query,
+                        tmp,
+                        deep=config.deep_validate,
+                        strict=config.strict_validate,
+                        max_decompressed_bytes=_deep_validate_cap(
+                            estimated_billable_bytes,
+                        ),
+                    )
+                digest = _place_tmp(
+                    tmp,
+                    dest,
+                    fsync_tracker,
+                    fsync_writes=config.fsync_writes,
+                    compute_digest=config.write_sidecars,
+                )
+                if config.write_sidecars:
+                    _write_sha256_sidecar(
+                        dest,
+                        digest,
+                        fsync_tracker,
+                        fsync_writes=config.fsync_writes,
+                    )
+                return ("no_data", label)
+            except ValidationError as exc:
+                tmp.unlink(missing_ok=True)
+                return ("failed", f"{label}: validation error: {exc}")
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+        except FatalError:
+            tmp.unlink(missing_ok=True)
+            raise
+        except RetryableError as exc:
+            tmp.unlink(missing_ok=True)
+            return ("failed", f"{label}: retryable error: {exc}")
         except ValidationError as exc:
             tmp.unlink(missing_ok=True)
             return ("failed", f"{label}: validation error: {exc}")
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
-    except FatalError:
-        tmp.unlink(missing_ok=True)
-        raise
-    except RetryableError as exc:
-        tmp.unlink(missing_ok=True)
-        return ("failed", f"{label}: retryable error: {exc}")
-    except ValidationError as exc:
-        tmp.unlink(missing_ok=True)
-        return ("failed", f"{label}: validation error: {exc}")
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    finally:
+        if in_flight is not None and token is not None:
+            in_flight.remove(token)
 
 
 __all__ = [

@@ -105,7 +105,8 @@ def _validate_one(
             deep=config.deep_validate,
             strict=config.strict_validate,
         )
-        _validate_sha256_sidecar(path)
+        if config.write_sidecars:
+            _validate_sha256_sidecar(path)
     except ValidationError as exc:
         LOGGER.warning(
             "validation_failed",
@@ -243,7 +244,11 @@ def _repair_one_sidecar(
         )
     except ValidationError as exc:
         return (item, str(exc), False)
-    _write_sha256_sidecar(path, fsync_tracker=fsync_tracker)
+    _write_sha256_sidecar(
+        path,
+        fsync_tracker=fsync_tracker,
+        fsync_writes=config.fsync_writes,
+    )
     return (item, None, True)
 
 

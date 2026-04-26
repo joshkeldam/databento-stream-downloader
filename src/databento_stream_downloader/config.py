@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
-from typing import ClassVar, Self
+from typing import ClassVar, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -35,7 +35,7 @@ class DownloadConfig(BaseModel):
     start: date
     end: date
     mode: RunMode
-    max_workers: int = Field(default=4, ge=1, le=50)
+    max_workers: int = Field(default=4, ge=1, le=100)
     request_timeout_seconds: float = Field(default=100.0, gt=0)
     max_cost_cents: int | None = Field(default=None, ge=0)
     max_cost_cents_per_bucket: int | None = Field(default=None, ge=0)
@@ -46,6 +46,9 @@ class DownloadConfig(BaseModel):
     strict_validate: bool = False
     validate_cached: bool = False
     validate_only: bool = False
+    write_sidecars: bool = False
+    validate_on_write: bool = False
+    fsync_writes: bool = False
     show_retries: bool = False
     yes: bool = False
 
@@ -75,6 +78,16 @@ class DownloadConfig(BaseModel):
             msg = f"unsupported schemas: {', '.join(invalid)}"
             raise ValueError(msg)
         return schemas
+
+    @model_validator(mode="before")
+    @classmethod
+    def _force_validate_on_write_for_strict_modes(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        payload = cast("dict[str, object]", data)
+        if payload.get("deep_validate") or payload.get("strict_validate"):
+            return {**payload, "validate_on_write": True}
+        return payload
 
     @model_validator(mode="after")
     def _validate_config(self) -> Self:

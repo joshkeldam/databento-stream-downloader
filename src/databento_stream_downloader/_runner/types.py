@@ -28,6 +28,34 @@ class _DirectoryFsyncTracker:
             return self._count
 
 
+@dataclass(slots=True)
+class _InFlightTracker:
+    """Thread-safe registry of WorkItems currently streaming."""
+
+    _items: dict[int, WorkItem] = field(default_factory=dict)
+    _next_token: int = 0
+    _lock: Lock = field(default_factory=Lock)
+
+    def add(self, item: WorkItem) -> int:
+        with self._lock:
+            self._next_token += 1
+            token = self._next_token
+            self._items[token] = item
+            return token
+
+    def remove(self, token: int) -> None:
+        with self._lock:
+            self._items.pop(token, None)
+
+    def snapshot(self) -> list[WorkItem]:
+        with self._lock:
+            return list(self._items.values())
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+
 class DownloaderClient(Protocol):
     """Client operations needed by the runner.
 
@@ -59,4 +87,5 @@ __all__ = [
     "DownloaderClient",
     "WorkItem",
     "_DirectoryFsyncTracker",
+    "_InFlightTracker",
 ]

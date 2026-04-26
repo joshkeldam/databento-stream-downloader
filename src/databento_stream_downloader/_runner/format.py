@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from rich.console import Console
+from pathlib import Path
+
+from rich import box
+from rich.console import Console, Group
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from databento_stream_downloader.models import CostEstimate
 
@@ -13,19 +18,36 @@ def _print_costs(
     estimates: list[CostEstimate],
     total_cents: int,
     max_cost_cents: int | None,
+    *,
+    archive: Path | None = None,
 ) -> None:
-    table = Table(title="Download Plan")
-    table.add_column("Symbol")
-    table.add_column("Schema")
-    table.add_column("Size", justify="right")
-    table.add_column("Cost", justify="right")
+    console.print(_render_plan_panel(estimates, total_cents, max_cost_cents, archive))
+
+
+def _render_plan_panel(
+    estimates: list[CostEstimate],
+    total_cents: int,
+    max_cost_cents: int | None,
+    archive: Path | None,
+) -> Panel:
     ranked = sorted(
         estimates,
         key=lambda item: (-item.cost_cents, -item.size_bytes, item.symbol, item.schema),
     )
-    total_bytes = 0
+    total_bytes = sum(item.size_bytes for item in ranked)
+
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        show_edge=False,
+        pad_edge=False,
+        expand=False,
+        header_style="dim",
+    )
+    table.add_column("Symbol", style="cyan", no_wrap=True)
+    table.add_column("Schema", style="white", no_wrap=True)
+    table.add_column("Size", justify="right", style="white", no_wrap=True)
+    table.add_column("Cost", justify="right", style="white", no_wrap=True)
     for item in ranked:
-        total_bytes += item.size_bytes
         table.add_row(
             item.symbol,
             item.schema,
@@ -33,10 +55,38 @@ def _print_costs(
             _money(item.cost_cents),
         )
     table.add_section()
-    table.add_row("", "Total", _bytes(total_bytes), _money(total_cents))
+    table.add_row(
+        Text(""),
+        Text("Total", style="bold"),
+        Text(_bytes(total_bytes), style="bold"),
+        Text(_money(total_cents), style="bold"),
+    )
+
+    summary = Table.grid(padding=(0, 3))
+    summary.add_column(style="dim", no_wrap=True)
+    summary.add_column(no_wrap=False)
+    summary.add_row("Buckets", f"{len(ranked):,}")
     if max_cost_cents is not None:
-        table.add_row("", "Planning cap", "", _money(max_cost_cents))
-    console.print(table)
+        summary.add_row("Planning cap", _money(max_cost_cents))
+        headroom_cents = max(0, max_cost_cents - total_cents)
+        if max_cost_cents > 0:
+            pct = headroom_cents * 100 // max_cost_cents
+            headroom = Text.assemble(
+                (_money(headroom_cents), "green" if headroom_cents else "yellow"),
+                (f"  ({pct}%)", "dim"),
+            )
+        else:
+            headroom = Text(_money(headroom_cents), style="green")
+        summary.add_row("Headroom", headroom)
+    if archive is not None:
+        summary.add_row("Archive", str(archive))
+
+    return Panel(
+        Group(table, Text(""), summary),
+        title="[bold]Download plan[/bold]",
+        border_style="cyan",
+        padding=(1, 2),
+    )
 
 
 def _money(cents: int) -> str:
@@ -61,4 +111,4 @@ def _bytes(size: int) -> str:
     return f"{size} B"
 
 
-__all__ = ["_bytes", "_money", "_print_costs"]
+__all__ = ["_bytes", "_money", "_print_costs", "_render_plan_panel"]

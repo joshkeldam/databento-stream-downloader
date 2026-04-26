@@ -37,6 +37,43 @@ for repository tags even though it is intended to be cloned and run locally.
   canonical filenames and warns on DBN-looking noncanonical leftovers.
 - Removed the unexported `validate_dbn_file` alias; embedded callers should use
   the public `validate_dbn_metadata` validator.
+- The hard `--workers` cap is raised from 50 to 100 for accounts whose Databento
+  rate limits permit higher concurrency. The `> 8` soft warning still fires for
+  any value above 8 so accidental high-concurrency runs remain visible.
+- Default streaming posture flipped to a fast path that trusts file existence
+  and atomic rename. SHA256 sidecars, post-write DBN metadata validation,
+  file/directory fsync, and the cached-file DBN preflight read are now opt-in
+  via `--write-sidecars`, `--validate-on-write`, `--fsync-writes`, and
+  `--validate-cached`. The new `--paranoid` preset enables all three integrity
+  flags at once. `--deep-validate` and `--strict-validate` continue to imply
+  `--validate-on-write`. End-of-run validation under `--validate-cached` /
+  `--validate-only` is unchanged.
+- Cost-estimation phase concurrency is internally capped at 40 workers (matching
+  the empirical Databento metadata-API 429 ceiling) regardless of `--workers`,
+  so high streaming concurrency no longer rate-limits the planning phase.
+- The Databento SDK warning suppression that previously serialized every API
+  call on a process-global lock is replaced with a module-import-time
+  `warnings.filterwarnings()` install. Worker threads now actually run the SDK
+  in parallel — high `--workers` values translate into proportionate speedups
+  instead of being silently bottlenecked at one in-flight request.
+- The streaming progress display is now a Rich Live panel that shows the
+  overall progress bar, throughput, ETA, the count of currently active
+  workers, the symbols/schemas/days each one is streaming, and a running tally
+  of placed/no_data/failed partitions.
+- The pre-confirmation plan is rendered as a panel that visually matches the
+  streaming UI: a tight header-rule data table sorted by cost, an explicit
+  Total row, and a labelled summary block with bucket count, planning cap,
+  remaining headroom (with percent), and archive path. The previously
+  duplicated `Archive:` / `Estimated:` lines outside the table are removed —
+  they are now consolidated inside the panel.
+- Transient transport failures — `socket.gaierror` and `requests`-wrapped
+  `ConnectionError` instances with `errno=None` (DNS hiccups, urllib3
+  `NameResolutionError`, "max retries exceeded" wrappers) — are now
+  classified as retryable. Previously they fell through `errno`-set logic and
+  raised `FatalConfigError`, aborting the entire run on a single partition's
+  network blip. After exhausted retries the partition still fails the way any
+  other retryable failure does, so the run can complete and the missing
+  partitions are re-fetched on the next incremental run.
 
 ## [0.2.0] - 2026-04-26
 

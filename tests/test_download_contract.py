@@ -644,7 +644,7 @@ def test_stream_one_reports_retryable_failure(tmp_path: Path) -> None:
 
 
 def test_stream_one_reports_validation_failure(tmp_path: Path) -> None:
-    config = _config(tmp_path)
+    config = _config(tmp_path).model_copy(update={"validate_on_write": True})
     item = WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))
 
     outcome, label = _stream_one(config, InvalidDbnClient(), item)
@@ -961,7 +961,7 @@ def test_runtime_config_preserves_write_probe_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config = _config(tmp_path)
+    config = _config(tmp_path).model_copy(update={"fsync_writes": True})
 
     def fail_fsync(_fd: int) -> NoReturn:
         raise OSError("fsync failed")
@@ -1102,21 +1102,21 @@ def test_run_download_validates_cached_files_without_prompt(tmp_path: Path) -> N
 
 
 def test_run_download_skips_cached_validation_by_default(tmp_path: Path) -> None:
+    """Default fast mode trusts cached files and skips DBN-metadata preflight."""
     config = _config(tmp_path)
     path = canonical_path(tmp_path, "ES.FUT", "mbo", date(2026, 4, 1))
     path.parent.mkdir(parents=True)
     path.write_bytes(b"not dbn")
 
-    with pytest.raises(SystemExit) as exc_info:
-        _run_download(config, FakeClient(), Console(record=True))
-
-    assert exc_info.value.code == 5
+    _run_download(config, FakeClient(), Console(record=True))
 
 
 def test_run_download_rejects_cached_garbage_even_with_matching_sidecar(
     tmp_path: Path,
 ) -> None:
-    config = _config(tmp_path)
+    config = _config(tmp_path).model_copy(
+        update={"validate_cached": True, "write_sidecars": True},
+    )
     path = canonical_path(tmp_path, "ES.FUT", "mbo", date(2026, 4, 1))
     path.parent.mkdir(parents=True)
     path.write_bytes(b"not dbn")
@@ -1289,7 +1289,9 @@ def test_single_day_config_generates_one_partition(tmp_path: Path) -> None:
 
 
 def test_run_download_writes_ledger_and_sha256_sidecar(tmp_path: Path) -> None:
-    config = _config(tmp_path)
+    config = _config(tmp_path).model_copy(
+        update={"write_sidecars": True, "fsync_writes": True},
+    )
     client = FakeClient()
 
     _run_download(config, client, Console(record=True))
@@ -1325,7 +1327,7 @@ def test_run_download_persists_directory_fsync_skipped_count(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config = _config(tmp_path)
+    config = _config(tmp_path).model_copy(update={"fsync_writes": True})
 
     def fail_fsync_directory(
         path: Path,
@@ -1790,7 +1792,7 @@ def test_total_estimated_cents_rounds_aggregate_decimal_once() -> None:
 
 
 def test_validate_one_rejects_missing_sidecar(tmp_path: Path) -> None:
-    config = _config(tmp_path)
+    config = _config(tmp_path).model_copy(update={"write_sidecars": True})
     path = canonical_path(tmp_path, "ES.FUT", "mbo", date(2026, 4, 1))
     path.parent.mkdir(parents=True)
     write_empty_dbn_file(

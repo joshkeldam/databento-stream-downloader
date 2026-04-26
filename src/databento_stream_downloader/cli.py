@@ -62,8 +62,8 @@ def _parse_nonnegative_int(value: str) -> int:
 
 def _parse_workers(value: str) -> int:
     workers = _parse_nonnegative_int(value)
-    if workers < 1 or workers > 50:
-        msg = f"workers must be between 1 and 50, got {workers}."
+    if workers < 1 or workers > 100:
+        msg = f"workers must be between 1 and 100, got {workers}."
         raise argparse.ArgumentTypeError(msg)
     return workers
 
@@ -142,7 +142,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--workers",
         type=_parse_workers,
         default=4,
-        help="Concurrent download workers. Default 4; max 50.",
+        help="Concurrent download workers. Default 4; max 100.",
     )
     _ = parser.add_argument(
         "--max-cost-cents",
@@ -200,6 +200,38 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Only validate cached files in scope; make no Databento cost or "
             "download requests."
+        ),
+    )
+    _ = parser.add_argument(
+        "--write-sidecars",
+        action="store_true",
+        help=(
+            "Write a SHA256 sidecar next to every placed file (default off; "
+            "kept for forensic-grade integrity runs)."
+        ),
+    )
+    _ = parser.add_argument(
+        "--validate-on-write",
+        action="store_true",
+        help=(
+            "Validate DBN metadata immediately after each write (default off; "
+            "implied by --deep-validate and --strict-validate)."
+        ),
+    )
+    _ = parser.add_argument(
+        "--fsync-writes",
+        action="store_true",
+        help=(
+            "fsync each placed file, sidecar, and parent directory (default "
+            "off; atomic replace still applies)."
+        ),
+    )
+    _ = parser.add_argument(
+        "--paranoid",
+        action="store_true",
+        help=(
+            "Preset that enables --write-sidecars, --validate-on-write, and "
+            "--fsync-writes for the strictest integrity posture."
         ),
     )
     _ = parser.add_argument(
@@ -283,6 +315,12 @@ def build_config(
     if max_cost_cents_per_bucket is None:
         max_cost_cents_per_bucket = settings.max_cost_cents_per_bucket
     symbols = tuple(dict.fromkeys(symbols_arg)) if symbols_arg else _default_symbols()
+    paranoid = cast("bool", getattr(args, "paranoid", False))
+    write_sidecars = cast("bool", getattr(args, "write_sidecars", False)) or paranoid
+    validate_on_write = (
+        cast("bool", getattr(args, "validate_on_write", False)) or paranoid
+    )
+    fsync_writes = cast("bool", getattr(args, "fsync_writes", False)) or paranoid
     return DownloadConfig(
         data_dir=cast("Path", args.data_dir).absolute(),
         symbols=symbols,
@@ -307,6 +345,9 @@ def build_config(
         strict_validate=cast("bool", args.strict_validate),
         validate_cached=cast("bool", args.validate_cached),
         validate_only=cast("bool", getattr(args, "validate_only", False)),
+        write_sidecars=write_sidecars,
+        validate_on_write=validate_on_write,
+        fsync_writes=fsync_writes,
         show_retries=cast("bool", getattr(args, "show_retries", False)),
         yes=cast("bool", args.yes),
     )

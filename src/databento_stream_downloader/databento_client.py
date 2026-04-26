@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import re
+import socket
 import threading
 import time
 import warnings
@@ -52,6 +53,25 @@ _RETRYABLE_OS_ERRORS = {
     errno.EPIPE,
     errno.ETIMEDOUT,
 }
+_RETRYABLE_OS_ERROR_MESSAGE_MARKERS = (
+    # DNS lookup transient failures (gaierror, urllib3 NameResolutionError).
+    "name resolution",
+    "nameresolutionerror",
+    "failed to resolve",
+    "nodename nor servname",
+    "name or service not known",
+    "temporary failure in name resolution",
+    # urllib3-wrapped transport errors that surface via requests.ConnectionError
+    # without a populated errno.
+    "max retries exceeded",
+    "connection aborted",
+    "connection reset",
+    "connection refused",
+    "remote end closed",
+    "broken pipe",
+    "read timed out",
+    "connection timed out",
+)
 _NO_DATA_422_PATTERNS = (
     re.compile(r"\bno records?\b"),
     re.compile(r"\bno records? found\b"),
@@ -69,7 +89,17 @@ _INVALID_422_MARKERS = (
     "stype",
     "dataset",
 )
-_SDK_WARNING_LOCK = threading.Lock()
+# Install the "No data found" BentoWarning suppression once at module import.
+# A per-call `warnings.catch_warnings()` would mutate Python's process-global
+# warning filter and require a lock — that lock serialized every SDK call
+# across all worker threads, eliminating real concurrency. Installing the
+# filter persistently is safe because BentoWarning("No data found") is only
+# ever emitted by SDK calls.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*No data found.*",
+    category=BentoWarning,
+)
 
 
 class DatabentoClient:
@@ -96,15 +126,13 @@ class DatabentoClient:
         client = self._client()
         try:
             cost = self._with_retry(
-                lambda: _call_with_sdk_warning_scope(
-                    lambda: client.metadata.get_cost(
-                        dataset=query.dataset,
-                        symbols=query.symbol,
-                        stype_in="parent",
-                        schema=query.schema,
-                        start=query.start.isoformat(),
-                        end=query.end.isoformat(),
-                    )
+                lambda: client.metadata.get_cost(
+                    dataset=query.dataset,
+                    symbols=query.symbol,
+                    stype_in="parent",
+                    schema=query.schema,
+                    start=query.start.isoformat(),
+                    end=query.end.isoformat(),
                 ),
                 operation="estimate_cost",
             )
@@ -118,15 +146,13 @@ class DatabentoClient:
         client = self._client()
         try:
             return self._with_retry(
-                lambda: _call_with_sdk_warning_scope(
-                    lambda: client.metadata.get_billable_size(
-                        dataset=query.dataset,
-                        symbols=query.symbol,
-                        stype_in="parent",
-                        schema=query.schema,
-                        start=query.start.isoformat(),
-                        end=query.end.isoformat(),
-                    )
+                lambda: client.metadata.get_billable_size(
+                    dataset=query.dataset,
+                    symbols=query.symbol,
+                    stype_in="parent",
+                    schema=query.schema,
+                    start=query.start.isoformat(),
+                    end=query.end.isoformat(),
                 ),
                 operation="estimate_size",
             )
@@ -140,16 +166,14 @@ class DatabentoClient:
 
         def _stream() -> object:
             output_path.unlink(missing_ok=True)
-            return _call_with_sdk_warning_scope(
-                lambda: client.timeseries.get_range(
-                    dataset=query.dataset,
-                    symbols=query.symbol,
-                    stype_in="parent",
-                    schema=query.schema,
-                    start=query.start.isoformat(),
-                    end=query.end.isoformat(),
-                    path=str(output_path),
-                )
+            return client.timeseries.get_range(
+                dataset=query.dataset,
+                symbols=query.symbol,
+                stype_in="parent",
+                schema=query.schema,
+                start=query.start.isoformat(),
+                end=query.end.isoformat(),
+                path=str(output_path),
             )
 
         try:
@@ -346,9 +370,15 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
 
 
 def _is_retryable_os_error(exc: OSError) -> bool:
-    if isinstance(exc, ConnectionError | TimeoutError):
+    if isinstance(exc, ConnectionError | TimeoutError | socket.gaierror):
         return True
-    return exc.errno in _RETRYABLE_OS_ERRORS
+    if exc.errno in _RETRYABLE_OS_ERRORS:
+        return True
+    # requests.exceptions.ConnectionError (and other urllib3 wrappers) inherit
+    # from OSError but carry errno=None, so fall back to message-based matching
+    # for transient transport failures we should retry.
+    message = str(exc).lower()
+    return any(marker in message for marker in _RETRYABLE_OS_ERROR_MESSAGE_MARKERS)
 
 
 def _is_retryable_bento_error(exc: BentoError) -> bool:
@@ -359,16 +389,6 @@ def _is_retryable_bento_error(exc: BentoError) -> bool:
         or "timeout" in message
         or "temporarily unavailable" in message
     )
-
-
-def _call_with_sdk_warning_scope[T](fn: Callable[[], T]) -> T:
-    with _SDK_WARNING_LOCK, warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*No data found.*",
-            category=BentoWarning,
-        )
-        return fn()
 
 
 def _raise_classified(exc: BentoClientError | BentoServerError) -> Never:

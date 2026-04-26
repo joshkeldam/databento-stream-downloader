@@ -9,6 +9,7 @@ __pycache__/
 .uv-cache/
 .pre-commit-cache/
 .coverage
+.coverage.json
 .audit-requirements.txt
 .hypothesis/
 dist/

@@ -75,8 +75,10 @@ def _validate_runtime_config(
             fd = -1
             file.write("ok")
             file.flush()
-            os.fsync(file.fileno())
-        _fsync_directory(config.data_dir, fsync_tracker)
+            if config.fsync_writes:
+                os.fsync(file.fileno())
+        if config.fsync_writes:
+            _fsync_directory(config.data_dir, fsync_tracker)
     except OSError as exc:
         msg = f"data_dir is not writable: {config.data_dir}"
         raise FatalConfigError(msg) from exc
@@ -84,7 +86,8 @@ def _validate_runtime_config(
         if fd >= 0:
             os.close(fd)
         probe.unlink(missing_ok=True)
-        _fsync_directory(config.data_dir, fsync_tracker)
+        if config.fsync_writes:
+            _fsync_directory(config.data_dir, fsync_tracker)
 
 
 @contextmanager
@@ -93,6 +96,8 @@ def _exclusive_run_lock(
     run_id: str,
     console: Console,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
+    *,
+    fsync_writes: bool = True,
 ) -> Generator[None]:
     lock_path = data_dir / _LOCK_FILE
     lock_file = lock_path.open("a+", encoding="utf-8")
@@ -110,14 +115,16 @@ def _exclusive_run_lock(
         json.dump(payload, lock_file, sort_keys=True)
         lock_file.write("\n")
         lock_file.flush()
-        os.fsync(lock_file.fileno())
-        _fsync_directory(data_dir, fsync_tracker)
+        if fsync_writes:
+            os.fsync(lock_file.fileno())
+            _fsync_directory(data_dir, fsync_tracker)
         yield
     finally:
         if locked:
             _unlock_file(lock_file)
         lock_file.close()
-        _fsync_directory(data_dir, fsync_tracker)
+        if fsync_writes:
+            _fsync_directory(data_dir, fsync_tracker)
 
 
 def _try_lock_file(file: TextIO) -> bool:
@@ -293,17 +300,35 @@ def _place_tmp(
     tmp: Path,
     dest: Path,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
-) -> str:
-    digest = _fsync_and_sha256_file(tmp)
+    *,
+    fsync_writes: bool = True,
+    compute_digest: bool = True,
+) -> str | None:
+    digest: str | None = None
+    if compute_digest and fsync_writes:
+        digest = _fsync_and_sha256_file(tmp)
+    elif compute_digest:
+        digest = _sha256_file(tmp)
+    elif fsync_writes:
+        _fsync_file(tmp)
     os.replace(tmp, dest)
-    _fsync_directory(dest.parent, fsync_tracker)
+    if fsync_writes:
+        _fsync_directory(dest.parent, fsync_tracker)
     return digest
+
+
+def _fsync_file(path: Path) -> None:
+    mode = "r+b" if os.name == "nt" else "rb"
+    with path.open(mode) as file:
+        os.fsync(file.fileno())
 
 
 def _write_sha256_sidecar(
     path: Path,
     digest: str | None = None,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
+    *,
+    fsync_writes: bool = True,
 ) -> None:
     digest = digest or _sha256_file(path)
     sidecar = _sha256_sidecar_path(path)
@@ -311,8 +336,15 @@ def _write_sha256_sidecar(
     with tmp.open("w", encoding="ascii") as file:
         file.write(f"{digest}  {path.name}\n")
         file.flush()
-        os.fsync(file.fileno())
-    _ = _place_tmp(tmp, sidecar, fsync_tracker)
+        if fsync_writes:
+            os.fsync(file.fileno())
+    _ = _place_tmp(
+        tmp,
+        sidecar,
+        fsync_tracker,
+        fsync_writes=fsync_writes,
+        compute_digest=False,
+    )
 
 
 def _validate_sha256_sidecar(path: Path) -> None:
@@ -416,6 +448,7 @@ __all__ = [
     "_exclusive_run_lock",
     "_fsync_and_sha256_file",
     "_fsync_directory",
+    "_fsync_file",
     "_linux_mount_entries",
     "_mount_entries",
     "_mount_for_path",

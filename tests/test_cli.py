@@ -49,13 +49,14 @@ def test_parse_date_rejects_bad_format() -> None:
 def test_parse_nonnegative_int_and_workers() -> None:
     assert cli._parse_nonnegative_int("50") == 50
     assert cli._parse_workers("50") == 50
+    assert cli._parse_workers("100") == 100
 
     with pytest.raises(argparse.ArgumentTypeError, match="non-negative"):
         cli._parse_nonnegative_int("-1")
     with pytest.raises(argparse.ArgumentTypeError, match="Invalid integer"):
         cli._parse_nonnegative_int("abc")
-    with pytest.raises(argparse.ArgumentTypeError, match="between 1 and 50"):
-        cli._parse_workers("100")
+    with pytest.raises(argparse.ArgumentTypeError, match="between 1 and 100"):
+        cli._parse_workers("101")
 
 
 def test_parse_positive_float_rejects_invalid_values() -> None:
@@ -444,6 +445,48 @@ def test_show_retries_flows_through_cli_main(
 
     assert len(configs) == 1
     assert cast("DownloadConfig", configs[0]).show_retries is True
+
+
+def test_paranoid_preset_enables_all_integrity_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "key")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "databento-stream-downloader",
+            "--symbol",
+            "ES.FUT",
+            "--schemas",
+            "definition",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--data-dir",
+            str(tmp_path),
+            "--max-cost-cents",
+            "1",
+            "--paranoid",
+            "--yes",
+        ],
+    )
+    configs: list[object] = []
+
+    def fake_run_download(config: object, *_args: object, **_kwargs: object) -> None:
+        configs.append(config)
+
+    monkeypatch.setattr(cli, "run_download", fake_run_download)
+
+    cli.main()
+
+    assert len(configs) == 1
+    config = cast("DownloadConfig", configs[0])
+    assert config.write_sidecars is True
+    assert config.validate_on_write is True
+    assert config.fsync_writes is True
 
 
 def test_high_worker_count_warning_is_visible(

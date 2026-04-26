@@ -260,7 +260,7 @@ def test_cli_config_validation_rejects_too_many_workers() -> None:
         start=date(2026, 4, 1),
         end=date(2026, 4, 1),
         dry_run=False,
-        workers=100,
+        workers=200,
         max_cost_cents=None,
         deep_validate=False,
         strict_validate=False,
@@ -271,7 +271,7 @@ def test_cli_config_validation_rejects_too_many_workers() -> None:
         verbose=False,
     )
 
-    with pytest.raises(PydanticValidationError, match="less than or equal to 50"):
+    with pytest.raises(PydanticValidationError, match="less than or equal to 100"):
         build_config(args)
 
 
@@ -298,6 +298,52 @@ def test_cli_default_schemas_exclude_mbo(tmp_path: Path) -> None:
 
     assert config.schemas == ("definition", "statistics", "status")
     assert "mbo" not in config.schemas
+
+
+def test_fast_mode_defaults_skip_integrity_overhead() -> None:
+    config = DownloadConfig(
+        data_dir=Path("data"),
+        symbols=("ES.FUT",),
+        schemas=("definition",),
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 1),
+        mode=RunMode.EXECUTE,
+        max_cost_cents=1,
+    )
+
+    assert config.write_sidecars is False
+    assert config.validate_on_write is False
+    assert config.fsync_writes is False
+
+
+def test_strict_validate_implies_validate_on_write() -> None:
+    config = DownloadConfig(
+        data_dir=Path("data"),
+        symbols=("ES.FUT",),
+        schemas=("definition",),
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 1),
+        mode=RunMode.EXECUTE,
+        max_cost_cents=1,
+        strict_validate=True,
+    )
+
+    assert config.validate_on_write is True
+
+
+def test_deep_validate_implies_validate_on_write() -> None:
+    config = DownloadConfig(
+        data_dir=Path("data"),
+        symbols=("ES.FUT",),
+        schemas=("definition",),
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 1),
+        mode=RunMode.EXECUTE,
+        max_cost_cents=1,
+        deep_validate=True,
+    )
+
+    assert config.validate_on_write is True
 
 
 def test_zero_cost_cap_requires_allow_free_only(tmp_path: Path) -> None:

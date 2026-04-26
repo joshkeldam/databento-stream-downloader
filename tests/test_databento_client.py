@@ -23,7 +23,6 @@ from databento.common.error import (
 from databento_stream_downloader.databento_client import (
     DatabentoClient,
     _apply_sdk_timeout,
-    _call_with_sdk_warning_scope,
     _is_retryable_os_error,
     _is_semantic_no_data_422,
     _raise_classified,
@@ -45,24 +44,35 @@ def _client(*, sleeps: list[float]) -> DatabentoClient:
     )
 
 
-def test_no_data_bento_warning_is_suppressed_only_in_sdk_warning_scope() -> None:
+def test_no_data_bento_warning_is_suppressed_globally() -> None:
+    """The "No data found" BentoWarning is filtered for the lifetime of the process.
+
+    A persistent filter is the only way to suppress these warnings without
+    serializing every Databento SDK call on a process-global lock. Other
+    BentoWarnings continue to propagate.
+    """
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        _call_with_sdk_warning_scope(
-            lambda: warnings.warn(
-                "No data found for the request you submitted.",
-                BentoWarning,
-                stacklevel=1,
-            )
+        warnings.resetwarnings()
+        # Re-install the filter our module installs at import time, since
+        # catch_warnings() snapshots and restores the filter list.
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*No data found.*",
+            category=BentoWarning,
         )
         warnings.warn(
             "No data found for the request you submitted.",
             BentoWarning,
             stacklevel=1,
         )
+        warnings.warn(
+            "Some other Bento problem.",
+            BentoWarning,
+            stacklevel=1,
+        )
 
     assert len(caught) == 1
-    assert caught[0].category is BentoWarning
+    assert "Some other" in str(caught[0].message)
 
 
 def test_cost_estimate_conversion_rounds_half_up() -> None:
@@ -231,6 +241,23 @@ def test_retry_retries_connection_reset_os_error() -> None:
 
 def test_retryable_os_error_accepts_timeout_subclasses() -> None:
     assert _is_retryable_os_error(TimeoutError("timeout")) is True
+
+
+def test_retryable_os_error_accepts_dns_resolution_failures() -> None:
+    """DNS hiccups (gaierror) and requests.ConnectionError wrappers retry."""
+    import socket
+
+    assert _is_retryable_os_error(socket.gaierror(8, "nodename nor servname")) is True
+    # requests.ConnectionError is OSError-derived but carries errno=None and
+    # surfaces transport detail in its message. Simulate the shape.
+    wrapped = OSError(
+        "HTTPSConnectionPool(host='hist.databento.com', port=443): Max retries "
+        "exceeded with url: /v0/timeseries.get_range "
+        "(Caused by NameResolutionError(\"Failed to resolve 'hist.databento.com'\"))",
+    )
+    assert _is_retryable_os_error(wrapped) is True
+    # Sanity: an unrelated OSError without a known marker stays non-retryable.
+    assert _is_retryable_os_error(OSError("disk quota exceeded")) is False
 
 
 def test_retry_retries_project_retryable_errors() -> None:

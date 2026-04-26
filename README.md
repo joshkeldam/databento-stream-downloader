@@ -9,10 +9,13 @@ archives.
 
 ## Status
 
-This is a focused raw-data downloader with conservative defaults: execute runs
-require an explicit estimated-cost planning cap, canonical files are DBN
-metadata validated, no-data days are materialized, and every file in the run
-scope has a SHA256 sidecar after preflight.
+This is a focused raw-data downloader optimized for throughput by default.
+Execute runs require an explicit estimated-cost planning cap and no-data days
+are still materialized as zero-record DBN files. Per-file SHA256 sidecars,
+post-write DBN metadata validation, fsync, and cached-file DBN preflight are
+opt-in via `--write-sidecars`, `--validate-on-write`, `--fsync-writes`, and
+`--validate-cached`; the `--paranoid` preset enables all of them at once. See
+the **Performance modes** section below.
 
 ## Canonical Layout
 
@@ -87,9 +90,36 @@ The CLI loads `.env` from the current working directory before reading
 environment variables.
 
 The default worker count is `4`. Increase `--workers` only after observing
-Databento retry/rate-limit logs for your account; the hard CLI maximum is `50`.
-Use `--show-retries` to print the total retry sleeps attempted by the real
-Databento client at the end of the run.
+Databento retry/rate-limit logs for your account; the hard CLI maximum is `100`.
+The cost-estimation phase is internally capped at `40` workers regardless of
+`--workers` to avoid 429 rate limits on the metadata API. Use `--show-retries`
+to print the total retry sleeps attempted by the real Databento client at the
+end of the run.
+
+## Performance modes
+
+The default execute path follows a "trust file existence + atomic move"
+posture: the runner streams to a temporary file, atomically renames into the
+canonical path, and trusts the OS for durability. Cached files are not
+re-read on startup. Validation and integrity checks are opt-in:
+
+| Flag | What it adds | Per-file overhead |
+|---|---|---|
+| `--validate-on-write` | DBN metadata header check after each download | One zstd-decompress + header decode |
+| `--write-sidecars` | `{file}.sha256` written next to every placed file | One full file read + sidecar write |
+| `--fsync-writes` | `fsync` on data file, sidecar, and parent directory | Several syscalls; can be very slow on macOS |
+| `--validate-cached` | DBN metadata header check on every cached file at startup | Reads every cached file's header before any download starts |
+| `--validate-only` | Only validate cached files; no Databento requests | Same as `--validate-cached` |
+| `--deep-validate` | Drain full zstd frame to EOF (implies `--validate-on-write`) | Full file decompression |
+| `--strict-validate` | DBNStore record-level checks (implies `--validate-on-write`) | Full file decode |
+| `--paranoid` | Preset that enables `--write-sidecars`, `--validate-on-write`, and `--fsync-writes` | All of the above |
+
+What you give up in default mode: bit-rot detection (no per-file SHA256), per-write
+header validation (corruption surfaces only at the next `--validate-cached` run
+or at consumer read time), and crash durability after rename (atomic replace
+still applies, so no half-files are visible — but recently written files may be
+lost on power loss). All four are recoverable: re-run the download. The run is
+incremental.
 
 When `--symbols` is omitted, the downloader uses the default CME futures
 universe in `src/databento_stream_downloader/universe.toml`. That file also

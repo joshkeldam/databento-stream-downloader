@@ -21,6 +21,9 @@ from databento_stream_downloader.models import CostEstimate, CostQuery
 from databento_stream_downloader.pricing import decimal_dollars_to_cents
 
 _BUCKET_COST_WARN_FRACTION = Decimal("0.25")
+# Databento's metadata API rate-limits concurrent requests; 40 is the
+# empirical ceiling for the cost-estimation phase before 429s appear.
+_MAX_COST_WORKERS = 40
 LOGGER = structlog.get_logger(__name__)
 
 
@@ -137,7 +140,7 @@ def _estimate_costs(
 ) -> list[CostEstimate]:
     estimates_by_key: dict[tuple[str, str], tuple[Decimal, int]] = {}
     ranges = _cost_ranges(work)
-    workers = max(1, min(max_workers, len(ranges)))
+    workers = max(1, min(max_workers, _MAX_COST_WORKERS, len(ranges)))
 
     pool = ThreadPoolExecutor(max_workers=workers)
     futures: list[Future[tuple[str, str, Decimal, int]]] = []

@@ -22,7 +22,7 @@ from databento_stream_downloader._runner.cost import (
     _total_estimated_cents,
     _warn_in_flight_planning_exposure,
 )
-from databento_stream_downloader._runner.format import _bytes, _money, _print_costs
+from databento_stream_downloader._runner.format import _print_costs
 from databento_stream_downloader._runner.fsio import (
     _exclusive_run_lock,
     _sweep_stale_tmp_files,
@@ -105,7 +105,13 @@ def _run_download(
     fsync_tracker = _DirectoryFsyncTracker()
     _validate_runtime_config(config, fsync_tracker, error_console)
     with (
-        _exclusive_run_lock(config.data_dir, run_id, error_console, fsync_tracker),
+        _exclusive_run_lock(
+            config.data_dir,
+            run_id,
+            error_console,
+            fsync_tracker,
+            fsync_writes=config.fsync_writes,
+        ),
         structlog.contextvars.bound_contextvars(run_id=run_id),
     ):
         _run_download_locked(
@@ -144,21 +150,23 @@ def _run_download_locked(
     _sweep_stale_tmp_files(config)
     all_items = _all_items(config)
     existing_items = _existing_items(config)
-    metadata_issues = _validate_cached_metadata_preflight(
-        config,
-        existing_items,
-        error_console,
-    )
-    if metadata_issues:
-        raise SystemExit(5)
-    repair_issues = _repair_missing_sidecars(
-        config,
-        existing_items,
-        console,
-        fsync_tracker=fsync_tracker,
-    )
-    if repair_issues:
-        raise SystemExit(5)
+    if config.validate_cached or config.validate_only:
+        metadata_issues = _validate_cached_metadata_preflight(
+            config,
+            existing_items,
+            error_console,
+        )
+        if metadata_issues:
+            raise SystemExit(5)
+    if config.write_sidecars:
+        repair_issues = _repair_missing_sidecars(
+            config,
+            existing_items,
+            console,
+            fsync_tracker=fsync_tracker,
+        )
+        if repair_issues:
+            raise SystemExit(5)
     if config.validate_only:
         validation_items = _sorted_items(existing_items)
         if not validation_items:
@@ -186,7 +194,13 @@ def _run_download_locked(
 
     total_cents = _total_estimated_cents(estimates)
     total_bytes = sum(item.size_bytes for item in estimates)
-    _print_costs(console, estimates, total_cents, config.max_cost_cents)
+    _print_costs(
+        console,
+        estimates,
+        total_cents,
+        config.max_cost_cents,
+        archive=config.data_dir,
+    )
     _check_cost_cap(config, total_cents, error_console)
     _check_bucket_cost_caps(config, estimates, error_console)
     _check_disk_space(config.data_dir, total_bytes, error_console)
@@ -208,11 +222,7 @@ def _run_download_locked(
             error_console.print(_NONINTERACTIVE_REFUSAL)
             raise SystemExit(2)
         try:
-            console.print(f"\nArchive: {config.data_dir}")
-            console.print(
-                f"Estimated: {_bytes(total_bytes)}; {_money(total_cents)} planning cost"
-            )
-            answer = console.input("Proceed? [y/N] ")
+            answer = console.input("\n[bold]Proceed?[/bold] [dim]\\[y/N][/dim] ")
         except EOFError:
             error_console.print(_EOF_REFUSAL)
             raise SystemExit(2) from None
