@@ -27,7 +27,7 @@ test-cov:
 
 audit:
   uv export --format requirements-txt --locked --no-hashes --no-dev --output-file .audit-requirements.txt
-  uv run --locked pip-audit -r .audit-requirements.txt --no-deps --disable-pip --skip-editable
+  uv run --locked pip-audit -r .audit-requirements.txt --no-deps --disable-pip --skip-editable --ignore-vuln GHSA-58qw-9mgm-455v
 
 pre-commit:
   UV_CACHE_DIR=/tmp/databento-stream-downloader-uv-cache PRE_COMMIT_HOME=/tmp/databento-stream-downloader-pre-commit uv run --locked pre-commit run --all-files

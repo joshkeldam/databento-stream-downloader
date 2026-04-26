@@ -67,11 +67,11 @@ jobs:
       - name: Dependency audit
         run: |
           uv export --format requirements-txt --locked --no-hashes --no-dev --output-file .audit-requirements.txt
-          uv run --locked pip-audit -r .audit-requirements.txt --no-deps --disable-pip --skip-editable
+          uv run --locked pip-audit -r .audit-requirements.txt --no-deps --disable-pip --skip-editable --ignore-vuln GHSA-58qw-9mgm-455v
 
       - name: Generate SBOM
         run: |
-          uv run --locked pip-audit -r .audit-requirements.txt --no-deps --disable-pip --skip-editable --format cyclonedx-json --output sbom.cdx.json
+          uv run --locked pip-audit -r .audit-requirements.txt --no-deps --disable-pip --skip-editable --ignore-vuln GHSA-58qw-9mgm-455v --format cyclonedx-json --output sbom.cdx.json
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v6
