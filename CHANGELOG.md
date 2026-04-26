@@ -12,6 +12,12 @@ for repository tags even though it is intended to be cloned and run locally.
 - Ledger v3 records now include `exit_code` and `interrupted` fields for
   post-run outcome forensics.
 
+### Changed
+
+- Runner internals are split into lifecycle, filesystem, cost, streaming,
+  validation, ledger, work-discovery, formatting, and shared-type modules while
+  preserving the public `databento_stream_downloader.runner` import path.
+
 ## [0.2.0] - 2026-04-26
 
 ### Added

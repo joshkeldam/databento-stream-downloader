@@ -22,6 +22,13 @@ from databento_dbn.metadata import SymbolMapping
 from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
 
+import databento_stream_downloader._runner.cost as runner_cost
+import databento_stream_downloader._runner.fsio as runner_fsio
+import databento_stream_downloader._runner.ledger as runner_ledger
+import databento_stream_downloader._runner.lifecycle as runner_lifecycle
+import databento_stream_downloader._runner.stream as runner_stream
+import databento_stream_downloader._runner.validation as runner_validation
+import databento_stream_downloader._runner.work as runner_work
 import databento_stream_downloader.dbn as dbn
 import databento_stream_downloader.runner as runner
 from databento_stream_downloader.config import DownloadConfig, RunMode
@@ -716,7 +723,7 @@ def test_cost_estimation_cancels_pending_ranges_on_failure(
             raise RetryableError("metadata failed")
         raise AssertionError("pending range should have been cancelled")
 
-    monkeypatch.setattr(runner, "_estimate_range", fake_estimate_range)
+    monkeypatch.setattr(runner_cost, "_estimate_range", fake_estimate_range)
     work = [
         WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
         WorkItem(symbol="NQ.FUT", schema="mbo", day=date(2026, 4, 1)),
@@ -873,7 +880,7 @@ def test_disk_space_check_rejects_insufficient_free_space(
         return usage._replace(free=1)
 
     monkeypatch.setattr(
-        runner.shutil,
+        runner_cost.shutil,
         "disk_usage",
         tiny_usage,
     )
@@ -902,7 +909,7 @@ def test_runtime_config_preserves_write_probe_error(
     def fail_fsync(_fd: int) -> NoReturn:
         raise OSError("fsync failed")
 
-    monkeypatch.setattr(runner.os, "fsync", fail_fsync)
+    monkeypatch.setattr(runner_fsio.os, "fsync", fail_fsync)
 
     with pytest.raises(FatalError, match="data_dir is not writable"):
         _validate_runtime_config(config)
@@ -952,7 +959,7 @@ def test_run_started_log_includes_pid_for_lock_correlation(
             events.append((event, kwargs))
 
     config = _config(tmp_path).model_copy(update={"mode": RunMode.DRY_RUN})
-    monkeypatch.setattr(runner, "LOGGER", Logger())
+    monkeypatch.setattr(runner_lifecycle, "LOGGER", Logger())
 
     _run_download(config, FakeClient(), Console(record=True))
 
@@ -968,7 +975,7 @@ def test_fsync_directory_ignores_unsupported_directory_fsync(
     def fail_open(_path: Path, _flags: int) -> NoReturn:
         raise OSError("directory fsync unsupported")
 
-    monkeypatch.setattr(runner.os, "open", fail_open)
+    monkeypatch.setattr(runner_fsio.os, "open", fail_open)
 
     tracker = _DirectoryFsyncTracker()
     other_tracker = _DirectoryFsyncTracker()
@@ -997,7 +1004,7 @@ def test_windows_lock_uses_same_byte_for_acquire_and_release(
 
     import sys
 
-    monkeypatch.setattr(runner.os, "name", "nt")
+    monkeypatch.setattr(runner_fsio.os, "name", "nt")
     monkeypatch.setitem(sys.modules, "msvcrt", FakeMsvcrt)
     lock_file = (tmp_path / ".run.lock").open("a+", encoding="utf-8")
     try:
@@ -1010,8 +1017,8 @@ def test_windows_lock_uses_same_byte_for_acquire_and_release(
         lock_file.close()
 
     assert offsets == [
-        ("lock", runner._WINDOWS_LOCK_OFFSET),
-        ("unlock", runner._WINDOWS_LOCK_OFFSET),
+        ("lock", runner_fsio._WINDOWS_LOCK_OFFSET),
+        ("unlock", runner_fsio._WINDOWS_LOCK_OFFSET),
     ]
 
 
@@ -1070,7 +1077,7 @@ def test_stream_missing_handles_keyboard_interrupt_cleanly(
     ) -> NoReturn:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(runner, "as_completed", interrupting_as_completed)
+    monkeypatch.setattr(runner_stream, "as_completed", interrupting_as_completed)
     config = _config(tmp_path)
     work = [WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))]
 
@@ -1244,7 +1251,8 @@ def test_run_download_persists_directory_fsync_skipped_count(
             fsync_tracker,
         )
 
-    monkeypatch.setattr(runner, "_fsync_directory", fail_fsync_directory)
+    monkeypatch.setattr(runner_fsio, "_fsync_directory", fail_fsync_directory)
+    monkeypatch.setattr(runner_ledger, "_fsync_directory", fail_fsync_directory)
 
     _run_download(config, FakeClient(), Console(record=True))
 
@@ -1285,7 +1293,7 @@ def test_run_download_records_validation_failure_exit_code(
         _ = (config, console, work)
         return 1
 
-    monkeypatch.setattr(runner, "_validate", fake_validate)
+    monkeypatch.setattr(runner_lifecycle, "_validate", fake_validate)
 
     with pytest.raises(SystemExit) as exc_info:
         _run_download(config, FakeClient(), Console(record=True))
@@ -1396,7 +1404,7 @@ def test_repair_verifies_valid_sidecar_without_rewriting(
     def fail_write(_path: Path, _digest: str | None = None) -> NoReturn:
         raise AssertionError("repair should not rewrite a matching sidecar")
 
-    monkeypatch.setattr(runner, "_write_sha256_sidecar", fail_write)
+    monkeypatch.setattr(runner_validation, "_write_sha256_sidecar", fail_write)
 
     issues = _repair_missing_sidecars(
         config,
@@ -1471,7 +1479,7 @@ def test_repair_uses_metadata_only_validation(
         calls.append((deep, strict))
         validate_dbn_metadata(query, dbn_path, deep=deep, strict=strict)
 
-    monkeypatch.setattr(runner, "validate_dbn_metadata", validate)
+    monkeypatch.setattr(runner_validation, "validate_dbn_metadata", validate)
 
     issues = _repair_missing_sidecars(
         config,
@@ -1551,7 +1559,11 @@ def test_run_download_enforces_in_flight_planning_guard_across_partitions(
     ) -> dict[WorkItem, int]:
         return dict.fromkeys(work, 1)
 
-    monkeypatch.setattr(runner, "_allocate_estimated_cost_cents", inflated_allocation)
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "_allocate_estimated_cost_cents",
+        inflated_allocation,
+    )
 
     with pytest.raises(FatalError, match="in-flight planned cost exceeded"):
         _run_download(config, client, Console(record=True))
@@ -1569,7 +1581,7 @@ def test_existing_items_ignores_unparseable_and_tmp_names(
         def warning(self, event: str, **kwargs: object) -> None:
             events.append((event, kwargs))
 
-    monkeypatch.setattr(runner, "LOGGER", Logger())
+    monkeypatch.setattr(runner_work, "LOGGER", Logger())
     config = _config(tmp_path).model_copy(update={"end": date(2026, 4, 3)})
     directory = tmp_path / "raw" / "glbx-mdp3" / "ES.FUT" / "mbo"
     directory.mkdir(parents=True)
@@ -1726,7 +1738,7 @@ def test_reject_known_network_filesystem(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        runner,
+        runner_fsio,
         "_linux_mount_entries",
         lambda: [(tmp_path.resolve(strict=False), "nfs")],
     )
@@ -1743,7 +1755,7 @@ def test_mount_for_path_selects_nearest_mount(
     child = root / "archive"
     child.mkdir()
     monkeypatch.setattr(
-        runner,
+        runner_fsio,
         "_linux_mount_entries",
         lambda: [(root, "apfs"), (child, "nfs")],
     )
@@ -1793,9 +1805,9 @@ def test_stale_tmp_sweep_is_scoped_to_requested_symbols(tmp_path: Path) -> None:
 
 
 def test_universe_hash_ignores_comments(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(runner, "load_default_symbols", lambda: ("ES.FUT",))
+    monkeypatch.setattr(runner_ledger, "load_default_symbols", lambda: ("ES.FUT",))
     monkeypatch.setattr(
-        runner,
+        runner_ledger,
         "load_first_data_utc_dates",
         lambda: {"ES.FUT": date(2010, 1, 1)},
     )
