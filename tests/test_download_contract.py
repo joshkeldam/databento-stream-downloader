@@ -80,6 +80,7 @@ from databento_stream_downloader.runner import (
     _validate_one,
     _validate_runtime_config,
     _validate_sha256_sidecar,
+    _warn_in_flight_planning_exposure,
 )
 
 
@@ -868,6 +869,40 @@ def test_bucket_cost_cap_warns_on_large_global_cap_fraction(tmp_path: Path) -> N
     _check_bucket_cost_caps(config, estimates, console)
 
     assert "exceeds 25%" in console.export_text()
+
+
+def test_in_flight_planning_exposure_warns_before_streaming(tmp_path: Path) -> None:
+    config = _config(tmp_path).model_copy(update={"max_workers": 3})
+    console = Console(record=True)
+    work = [
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 2)),
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 3)),
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 4)),
+    ]
+    allocation = {
+        work[0]: 50,
+        work[1]: 200,
+        work[2]: 100,
+        work[3]: 25,
+    }
+
+    _warn_in_flight_planning_exposure(config, work, allocation, console)
+
+    output = console.export_text()
+    assert "3 concurrent workers" in output
+    assert "up to 3 partitions worth $3.50" in output
+    assert "before the in-flight planning guard can react" in output
+
+
+def test_in_flight_planning_exposure_skips_single_worker(tmp_path: Path) -> None:
+    config = _config(tmp_path).model_copy(update={"max_workers": 1})
+    console = Console(record=True)
+    work = [WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))]
+
+    _warn_in_flight_planning_exposure(config, work, {work[0]: 100}, console)
+
+    assert console.export_text() == ""
 
 
 def test_disk_space_check_rejects_insufficient_free_space(

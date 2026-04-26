@@ -136,10 +136,13 @@ request if the estimate exceeds the planning cap. During streaming, the runner
 also tracks landed planned cost for completed partitions as a secondary guard.
 Failed and retried stream attempts can repeat billable work without increasing
 the landed completed-partition total, so actual billing can exceed
-`--max-cost-cents`. Use `--max-cost-cents-per-bucket` to set a planning cap for
-any single symbol/schema bucket. When a global planning cap is configured, the
-runner also warns if one bucket exceeds 25% of the global planning cap so an
-accidentally expensive line item is visible before execution.
+`--max-cost-cents`. Concurrent workers can also have multiple billable
+partitions in flight before the secondary guard can react; before confirmation,
+the runner prints the planned cost of the largest currently possible in-flight
+set. Use `--max-cost-cents-per-bucket` to set a planning cap for any single
+symbol/schema bucket. When a global planning cap is configured, the runner also
+warns if one bucket exceeds 25% of the global planning cap so an accidentally
+expensive line item is visible before execution.
 
 Interactive runs ask for confirmation before downloading. Non-interactive runs
 must pass `--yes`; otherwise the command exits before making download requests.
@@ -231,10 +234,12 @@ but the run-level planning cap is checked after aggregating all Decimal dollar
 estimates and rounding once. The in-flight planning guard is based on the
 planned per-partition estimate allocation; it is not a live billing feed and
 does not include failed or retried stream attempts that never become canonical
-files. In-flight landed planned cost is accumulated from the symbol/schema
-bucket estimate assigned to completed partitions. Semantic no-data partitions
-still receive planned estimated cost and bytes, and sparse missing days are
-allocated evenly within each symbol/schema estimate bucket.
+files. It also reacts only after a worker finishes a partition, so with
+`--workers W` up to `W` partitions can be actively streaming before the guard
+observes their planned cost. In-flight landed planned cost is accumulated from
+the symbol/schema bucket estimate assigned to completed partitions. Semantic
+no-data partitions still receive planned estimated cost and bytes, and sparse
+missing days are allocated evenly within each symbol/schema estimate bucket.
 
 On POSIX filesystems, placement uses the standard fsync-file, rename,
 fsync-directory pattern as far as the Databento SDK path-writing API allows. The

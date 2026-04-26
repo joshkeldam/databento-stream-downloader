@@ -100,6 +100,37 @@ def _check_bucket_cost_caps(
             )
 
 
+def _warn_in_flight_planning_exposure(
+    config: DownloadConfig,
+    work: list[WorkItem],
+    estimated_cost_cents_by_item: dict[WorkItem, int],
+    console: Console,
+) -> None:
+    if config.max_cost_cents is None:
+        return
+    effective_workers = min(config.max_workers, len(work))
+    if effective_workers <= 1:
+        return
+    exposure_cents = sum(
+        sorted(estimated_cost_cents_by_item.values(), reverse=True)[:effective_workers]
+    )
+    if exposure_cents == 0:
+        return
+    console.print(
+        "[yellow]Warning:[/yellow] with "
+        f"{effective_workers} concurrent workers, up to {effective_workers} "
+        f"partitions worth {_money(exposure_cents)} planned cost may be in flight "
+        "before the in-flight planning guard can react."
+    )
+    LOGGER.warning(
+        "in_flight_planning_exposure",
+        workers=effective_workers,
+        partitions=effective_workers,
+        planned_cost_cents=exposure_cents,
+        planning_cap_cents=config.max_cost_cents,
+    )
+
+
 def _estimate_costs(
     client: DownloaderClient,
     work: list[WorkItem],
@@ -278,4 +309,5 @@ __all__ = [
     "_estimate_range",
     "_refuse_ambiguous_zero_cap",
     "_total_estimated_cents",
+    "_warn_in_flight_planning_exposure",
 ]

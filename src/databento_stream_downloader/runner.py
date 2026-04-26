@@ -15,6 +15,7 @@ from databento_stream_downloader._runner.cost import (
     _estimate_range,
     _refuse_ambiguous_zero_cap,
     _total_estimated_cents,
+    _warn_in_flight_planning_exposure,
 )
 from databento_stream_downloader._runner.format import _bytes, _money, _print_costs
 from databento_stream_downloader._runner.fsio import (
@@ -164,6 +165,7 @@ __all__ = [
     "_validate_runtime_config",
     "_validate_sha256_sidecar",
     "_warn_if_suspicious_archive_file",
+    "_warn_in_flight_planning_exposure",
     "_warn_suspicious_archive_files",
     "_work_items_from_all",
     "_write_run_ledger",

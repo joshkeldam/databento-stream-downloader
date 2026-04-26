@@ -20,6 +20,7 @@ from databento_stream_downloader._runner.cost import (
     _check_disk_space,
     _estimate_costs,
     _total_estimated_cents,
+    _warn_in_flight_planning_exposure,
 )
 from databento_stream_downloader._runner.format import _bytes, _money, _print_costs
 from databento_stream_downloader._runner.fsio import (
@@ -178,6 +179,15 @@ def _run_download_locked(
     if config.mode is RunMode.DRY_RUN:
         return
 
+    estimated_bytes_by_item = _allocate_estimated_billable_bytes(work, estimates)
+    estimated_cost_cents_by_item = _allocate_estimated_cost_cents(work, estimates)
+    _warn_in_flight_planning_exposure(
+        config,
+        work,
+        estimated_cost_cents_by_item,
+        error_console,
+    )
+
     if not config.yes:
         if not sys.stdin.isatty():
             error_console.print(_NONINTERACTIVE_REFUSAL)
@@ -195,8 +205,6 @@ def _run_download_locked(
             return
 
     started = time.monotonic()
-    estimated_bytes_by_item = _allocate_estimated_billable_bytes(work, estimates)
-    estimated_cost_cents_by_item = _allocate_estimated_cost_cents(work, estimates)
     result = _stream_missing(
         config,
         client,
