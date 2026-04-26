@@ -164,8 +164,9 @@ the canonical DBN file once. Each completed run appends a durable JSON record to
 Consumers should ignore unknown fields, and breaking ledger changes will
 increment the schema version. Ledger schemas are stored under `schemas/`, and
 `scripts/validate_ledger.py` validates JSONL ledgers against the matching schema
-version. Version 3 records include `exit_code`, `interrupted`, retry counts,
-and directory-fsync skip counts for post-run reconciliation. Ledger records
+version. Version 4 records include `exit_code`, `interrupted`, retry counts,
+stream retry/attempt estimates, terminal outcome counts, and directory-fsync
+skip counts for post-run reconciliation. Ledger records
 include local `host` and `user` fields for incident correlation; treat ledgers
 as operational metadata and do not publish them unchanged. The active ledger
 rotates before append on the next ledger write when it already exceeds
@@ -267,8 +268,9 @@ based on completed partitions, not attempted bytes or a refund-aware billing
 feed. Actual Databento billing can therefore exceed `--max-cost-cents` on
 failed/retried streams. Retry logs include the operation name and mark stream
 retries as restarting from byte zero so operators can see repeated large-stream
-attempts while the run is active. Ledger v3 records the run exit code plus total
-retry counts and retry counts by operation for post-run reconciliation.
+attempts while the run is active. Ledger v4 records the run exit code, total
+retry counts, retry counts by operation, stream retry count, estimated stream
+attempt count, and terminal outcomes for post-run reconciliation.
 
 Temporary files older than five minutes are removed at run start and logged as
 warnings. The sweep is scoped to the requested symbol/schema directories rather

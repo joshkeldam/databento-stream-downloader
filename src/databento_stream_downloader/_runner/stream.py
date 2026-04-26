@@ -125,10 +125,7 @@ def _stream_missing(
                     progress.console.print(f"  [yellow]⚠[/yellow] no data {label}")
             else:
                 failed += 1
-                if not progress.console.quiet:
-                    progress.console.print(f"  [red]✗[/red] {label}")
-                else:
-                    failure_console.print(f"  [red]✗[/red] {label}")
+                failure_console.print(f"  [red]✗[/red] {label}")
             if outcome in ("placed", "no_data"):
                 landed_estimated_bytes += (estimated_bytes_by_item or {}).get(
                     item,

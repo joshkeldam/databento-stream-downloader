@@ -9,8 +9,8 @@ for repository tags even though it is intended to be cloned and run locally.
 
 ### Added
 
-- Ledger v3 records now include `exit_code` and `interrupted` fields for
-  post-run outcome forensics.
+- Ledger v4 records now include `exit_code`, `interrupted`, stream retry counts,
+  estimated stream attempts, and terminal outcomes for post-run forensics.
 
 ### Changed
 
@@ -23,6 +23,8 @@ for repository tags even though it is intended to be cloned and run locally.
   non-zero planned cost in flight before the secondary planning guard can react.
 - Network-filesystem preflight detection now covers macOS mount output and
   Windows remote drives, and detection-unavailable cases emit a visible warning.
+- Failed partition rows are now routed consistently to stderr through the error
+  console in both quiet and non-quiet runs.
 
 ## [0.2.0] - 2026-04-26
 

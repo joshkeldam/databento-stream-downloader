@@ -58,6 +58,30 @@ def _retry_counts_by_operation(client: DownloaderClient) -> dict[str, int]:
     return {}
 
 
+def _stream_retry_count(client: DownloaderClient) -> int:
+    return _retry_counts_by_operation(client).get("stream_to_file", 0)
+
+
+def _stream_attempt_count_estimated(
+    result: DownloadResult,
+    stream_retry_count: int,
+) -> int:
+    return result.placed + result.no_data + result.failed + stream_retry_count
+
+
+def _attempts_by_outcome(
+    result: DownloadResult,
+    stream_retry_count: int,
+) -> dict[str, int]:
+    return {
+        "placed": result.placed,
+        "no_data": result.no_data,
+        "failed": result.failed,
+        "cached": result.cached,
+        "stream_retries_from_byte_zero": stream_retry_count,
+    }
+
+
 def _write_run_ledger(
     *,
     config: DownloadConfig,
@@ -83,8 +107,10 @@ def _write_run_ledger(
     symbols_sha256 = hashlib.sha256(
         "\n".join(config.symbols).encode("utf-8"),
     ).hexdigest()
+    retry_counts_by_operation = _retry_counts_by_operation(client)
+    stream_retry_count = _stream_retry_count(client)
     payload = {
-        "ledger_schema_version": 3,
+        "ledger_schema_version": 4,
         "run_id": run_id,
         "dataset": DATASET,
         "package_version": package_version,
@@ -112,7 +138,13 @@ def _write_run_ledger(
         "estimated_billable_bytes": estimated_billable_bytes,
         "estimated_billable_bytes_landed": result.estimated_billable_bytes_landed,
         "retry_count_total": _retry_count_total(client),
-        "retry_count_by_operation": _retry_counts_by_operation(client),
+        "retry_count_by_operation": retry_counts_by_operation,
+        "stream_retry_count": stream_retry_count,
+        "stream_attempt_count_estimated": _stream_attempt_count_estimated(
+            result,
+            stream_retry_count,
+        ),
+        "attempts_by_outcome": _attempts_by_outcome(result, stream_retry_count),
         "directory_fsync_skipped_count": fsync_tracker.count(),
         "elapsed_seconds": round(elapsed_seconds, 3),
         "universe_sha256": universe_sha256,
@@ -172,6 +204,8 @@ __all__ = [
     "_retry_count_total",
     "_retry_counts_by_operation",
     "_rotate_ledger_if_needed",
+    "_stream_attempt_count_estimated",
+    "_stream_retry_count",
     "_universe_semantic_sha256",
     "_write_run_ledger",
 ]

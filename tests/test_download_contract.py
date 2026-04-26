@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from typing import NoReturn, cast
+from typing import ClassVar, NoReturn, cast
 
 import databento_dbn
 import pytest
@@ -155,6 +155,14 @@ class BuggyClient(FakeClient):
 
 class RetrySummaryClient(FakeClient):
     retry_count = 7
+
+
+class LedgerRetryClient(FakeClient):
+    retry_count = 3
+    retry_counts_by_operation: ClassVar[dict[str, int]] = {
+        "stream_to_file": 2,
+        "estimate_cost": 1,
+    }
 
 
 class FreeEstimateClient(FakeClient):
@@ -1139,7 +1147,7 @@ def test_stream_missing_quiet_suppresses_no_data_rows(tmp_path: Path) -> None:
     assert console.export_text() == ""
 
 
-def test_stream_missing_quiet_routes_failed_rows_to_error_console(
+def test_stream_missing_routes_failed_rows_to_error_console(
     tmp_path: Path,
 ) -> None:
     class RetryClient(FakeClient):
@@ -1148,7 +1156,7 @@ def test_stream_missing_quiet_routes_failed_rows_to_error_console(
             raise RetryableError("temporary")
 
     config = _config(tmp_path)
-    console = Console(record=True, quiet=True)
+    console = Console(record=True)
     error_console = Console(record=True)
     work = [WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))]
 
@@ -1161,7 +1169,7 @@ def test_stream_missing_quiet_routes_failed_rows_to_error_console(
     )
 
     assert result.failed == 1
-    assert console.export_text() == ""
+    assert "retryable error: temporary" not in console.export_text()
     assert "retryable error: temporary" in error_console.export_text()
 
 
@@ -1265,13 +1273,22 @@ def test_run_download_writes_ledger_and_sha256_sidecar(tmp_path: Path) -> None:
     ledger = tmp_path / "download-ledger.jsonl"
     assert ledger.exists()
     record = json.loads(ledger.read_text(encoding="utf-8"))
-    assert record["ledger_schema_version"] == 3
+    assert record["ledger_schema_version"] == 4
     assert record["placed"] == 1
     assert record["exit_code"] == 0
     assert record["interrupted"] is False
     assert record["package_version"]
     assert record["retry_count_total"] == 0
     assert record["retry_count_by_operation"] == {}
+    assert record["stream_retry_count"] == 0
+    assert record["stream_attempt_count_estimated"] == 1
+    assert record["attempts_by_outcome"] == {
+        "cached": 0,
+        "failed": 0,
+        "no_data": 0,
+        "placed": 1,
+        "stream_retries_from_byte_zero": 0,
+    }
     if os.name == "nt":
         assert record["directory_fsync_skipped_count"] > 0
     else:
@@ -1301,10 +1318,34 @@ def test_run_download_persists_directory_fsync_skipped_count(
 
     ledger = tmp_path / "download-ledger.jsonl"
     record = json.loads(ledger.read_text(encoding="utf-8"))
-    assert record["ledger_schema_version"] == 3
+    assert record["ledger_schema_version"] == 4
     assert record["exit_code"] == 0
     assert record["interrupted"] is False
     assert record["directory_fsync_skipped_count"] > 0
+
+
+def test_run_download_records_stream_retry_attempt_context(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    _run_download(config, LedgerRetryClient(), Console(record=True))
+
+    ledger = tmp_path / "download-ledger.jsonl"
+    record = json.loads(ledger.read_text(encoding="utf-8"))
+    assert record["ledger_schema_version"] == 4
+    assert record["retry_count_total"] == 3
+    assert record["retry_count_by_operation"] == {
+        "estimate_cost": 1,
+        "stream_to_file": 2,
+    }
+    assert record["stream_retry_count"] == 2
+    assert record["stream_attempt_count_estimated"] == 3
+    assert record["attempts_by_outcome"] == {
+        "cached": 0,
+        "failed": 0,
+        "no_data": 0,
+        "placed": 1,
+        "stream_retries_from_byte_zero": 2,
+    }
 
 
 def test_run_download_records_partial_failure_exit_code(tmp_path: Path) -> None:
@@ -1316,7 +1357,7 @@ def test_run_download_records_partial_failure_exit_code(tmp_path: Path) -> None:
     assert exc_info.value.code == 3
     ledger = tmp_path / "download-ledger.jsonl"
     record = json.loads(ledger.read_text(encoding="utf-8"))
-    assert record["ledger_schema_version"] == 3
+    assert record["ledger_schema_version"] == 4
     assert record["failed"] == 1
     assert record["exit_code"] == 3
     assert record["interrupted"] is False
@@ -1344,7 +1385,7 @@ def test_run_download_records_validation_failure_exit_code(
     assert exc_info.value.code == 5
     ledger = tmp_path / "download-ledger.jsonl"
     record = json.loads(ledger.read_text(encoding="utf-8"))
-    assert record["ledger_schema_version"] == 3
+    assert record["ledger_schema_version"] == 4
     assert record["validation_issues"] == 1
     assert record["exit_code"] == 5
     assert record["interrupted"] is False
