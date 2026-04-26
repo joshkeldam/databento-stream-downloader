@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
-import os
 import signal
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import cast
 
 import structlog
 from dotenv import load_dotenv
@@ -360,17 +359,17 @@ def main() -> None:
     try:
         with _installed_signal_handlers():
             run_download(config, api_key or "", console, error_console)
-    except InterruptedDownloadError:
+    except InterruptedDownloadError as exc:
         error_console.print(
             "[yellow]Interrupted. Stopping downloader; partial temp files will "
             "be cleaned on the next run.[/yellow]"
         )
         error_console.file.flush()
-        _exit_immediately(130)
-    except (ShutdownRequestedError, KeyboardInterrupt):
+        raise SystemExit(130) from exc
+    except (ShutdownRequestedError, KeyboardInterrupt) as exc:
         error_console.print("[yellow]Shutdown requested. Stopping downloader.[/yellow]")
         error_console.file.flush()
-        _exit_immediately(143)
+        raise SystemExit(143) from exc
     except FatalConfigError as exc:
         LOGGER.error(
             "fatal_config_error",
@@ -391,11 +390,6 @@ def main() -> None:
         LOGGER.exception("unexpected_cli_failure", error=str(exc))
         error_console.print(f"[bold red]Unexpected failure:[/bold red] {exc}")
         raise SystemExit(4) from exc
-
-
-def _exit_immediately(code: int) -> NoReturn:
-    """Exit without CPython's ThreadPoolExecutor atexit join traceback."""
-    os._exit(code)
 
 
 @contextmanager

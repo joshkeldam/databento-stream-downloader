@@ -8,7 +8,7 @@ import signal
 import sys
 from datetime import date
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import cast
 
 import pytest
 import structlog
@@ -349,7 +349,7 @@ def test_main_maps_config_failure_to_exit_2(
     assert exc_info.value.code == 2
 
 
-def test_main_interrupt_prints_clean_message_and_exits_immediately(
+def test_main_interrupt_prints_clean_message_and_exits_normally(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
@@ -379,11 +379,7 @@ def test_main_interrupt_prints_clean_message_and_exits_immediately(
     def interrupt(*_args: object, **_kwargs: object) -> None:
         raise InterruptedDownloadError("stop")
 
-    def exit_immediately(code: int) -> NoReturn:
-        raise SystemExit(code)
-
     monkeypatch.setattr(cli, "run_download", interrupt)
-    monkeypatch.setattr(cli, "_exit_immediately", exit_immediately)
 
     with pytest.raises(SystemExit) as exc_info:
         cli.main()
