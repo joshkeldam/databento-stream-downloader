@@ -35,6 +35,8 @@ for repository tags even though it is intended to be cloned and run locally.
   universe semantic hash ordering, and SHA256 sidecar round trips.
 - Cached archive discovery now accepts only strict `YYYY-MM-DD.dbn.zst`
   canonical filenames and warns on DBN-looking noncanonical leftovers.
+- Removed the unexported `validate_dbn_file` alias; embedded callers should use
+  the public `validate_dbn_metadata` validator.
 
 ## [0.2.0] - 2026-04-26
 

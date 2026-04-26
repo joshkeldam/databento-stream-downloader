@@ -120,24 +120,6 @@ def validate_dbn_metadata(
         _validate_records(query, path)
 
 
-def validate_dbn_file(
-    query: StreamQuery,
-    path: Path,
-    *,
-    deep: bool = False,
-    strict: bool = False,
-    max_decompressed_bytes: int | None = None,
-) -> None:
-    """Backward-compatible alias for validate_dbn_metadata."""
-    validate_dbn_metadata(
-        query,
-        path,
-        deep=deep,
-        strict=strict,
-        max_decompressed_bytes=max_decompressed_bytes,
-    )
-
-
 def _read_metadata(
     path: Path,
     *,
@@ -346,7 +328,7 @@ def _mapped_instrument_ids(mappings: object) -> set[int]:
                     ids.add(int(raw_id))
                 else:
                     raise TypeError
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 raise ValidationError(
                     f"non-numeric symbology instrument id: {raw_id!r}"
                 ) from None
