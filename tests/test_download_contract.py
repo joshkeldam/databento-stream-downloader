@@ -1964,7 +1964,7 @@ def test_print_retry_summary_handles_real_and_injected_clients() -> None:
     assert "unavailable" in output
 
 
-def test_cost_table_skips_top_ten_section_for_small_breakdowns() -> None:
+def test_cost_table_uses_single_sorted_breakdown_for_small_runs() -> None:
     console = Console(record=True, width=140)
     estimates = [
         CostEstimate(
@@ -1984,7 +1984,7 @@ def test_cost_table_skips_top_ten_section_for_small_breakdowns() -> None:
     assert "Full breakdown" not in output
 
 
-def test_cost_table_adds_top_ten_section_for_large_runs() -> None:
+def test_cost_table_uses_single_sorted_breakdown_for_large_runs() -> None:
     console = Console(record=True, width=140)
     estimates = [
         CostEstimate(
@@ -2000,8 +2000,9 @@ def test_cost_table_adds_top_ten_section_for_large_runs() -> None:
     _print_costs(console, estimates, total_cents=120, max_cost_cents=100)
 
     output = console.export_text()
-    assert "Top 10" in output
-    assert "Full breakdown" in output
+    assert "Top 10" not in output
+    assert "Full breakdown" not in output
+    assert output.count("ES15.FUT") == 1
 
 
 def test_first_data_utc_dates_clip_default_universe_work_items(tmp_path: Path) -> None:

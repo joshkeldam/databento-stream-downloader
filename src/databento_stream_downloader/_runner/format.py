@@ -23,18 +23,6 @@ def _print_costs(
         estimates,
         key=lambda item: (-item.cost_cents, -item.size_bytes, item.symbol, item.schema),
     )
-    if len(ranked) > 15:
-        table.add_section()
-        table.add_row("Top 10", "", "", "")
-        for item in ranked[:10]:
-            table.add_row(
-                item.symbol,
-                item.schema,
-                _bytes(item.size_bytes),
-                _money(item.cost_cents),
-            )
-        table.add_section()
-        table.add_row("Full breakdown", "", "", "")
     total_bytes = 0
     for item in ranked:
         total_bytes += item.size_bytes
