@@ -308,9 +308,11 @@ just check
 ```
 
 GitHub Actions runs these checks on Linux, macOS, and Windows. Coverage is
-enforced in CI, pre-commit hooks and dependency auditing run in CI, and the
-package build is verified as part of the quality gate. CI also emits a CycloneDX
-JSON dependency SBOM artifact generated from the locked runtime requirements.
+enforced in CI with a 92% global floor plus explicit per-file floors for the CLI
+and Databento client adapter. Pre-commit hooks and dependency auditing run in
+CI, and the package build is verified as part of the quality gate. CI also emits
+a CycloneDX JSON dependency SBOM artifact generated from the locked runtime
+requirements.
 
 This repository is currently clone-and-run software, not a published release
 channel. There is no PyPI publishing workflow, signed wheel, or provenance

@@ -24,6 +24,7 @@ from databento_stream_downloader.databento_client import (
     DatabentoClient,
     _apply_sdk_timeout,
     _call_with_sdk_warning_scope,
+    _is_retryable_os_error,
     _is_semantic_no_data_422,
     _raise_classified,
     _retry_after_seconds,
@@ -105,6 +106,8 @@ def test_retry_succeeds_after_transient_error() -> None:
 
     assert client._with_retry(flaky) == "ok"
     assert sleeps == [1.0]
+    assert client.retry_count == 1
+    assert client.retry_counts_by_operation == {"request": 1}
 
 
 def test_retry_honors_retry_after_header() -> None:
@@ -163,6 +166,24 @@ def test_retry_after_ignores_invalid_header() -> None:
     assert _retry_after_seconds(exc) is None
 
 
+def test_retry_after_ignores_missing_and_empty_values() -> None:
+    class NoGetHeadersError(Exception):
+        headers: ClassVar[object] = object()
+
+    class EmptyHeaderError(Exception):
+        headers: ClassVar[dict[str, str]] = {"Retry-After": " "}
+
+    assert _retry_after_seconds(NoGetHeadersError()) is None
+    assert _retry_after_seconds(EmptyHeaderError()) is None
+
+
+def test_retry_after_ignores_naive_http_date() -> None:
+    class HeaderError(Exception):
+        headers: ClassVar[dict[str, str]] = {"Retry-After": "Wed, 21 Oct 2030 07:28:00"}
+
+    assert _retry_after_seconds(HeaderError()) is None
+
+
 def test_retry_handles_sdk_wrapped_network_error() -> None:
     sleeps: list[float] = []
     client = _client(sleeps=sleeps)
@@ -208,6 +229,10 @@ def test_retry_retries_connection_reset_os_error() -> None:
     assert sleeps == [1.0]
 
 
+def test_retryable_os_error_accepts_timeout_subclasses() -> None:
+    assert _is_retryable_os_error(TimeoutError("timeout")) is True
+
+
 def test_retry_retries_project_retryable_errors() -> None:
     sleeps: list[float] = []
     client = _client(sleeps=sleeps)
@@ -222,6 +247,19 @@ def test_retry_retries_project_retryable_errors() -> None:
 
     assert client._with_retry(flaky) == "ok"
     assert sleeps == [1.0]
+
+
+def test_retry_rejects_non_retryable_bento_error() -> None:
+    sleeps: list[float] = []
+    client = _client(sleeps=sleeps)
+
+    def fail() -> NoReturn:
+        raise BentoError("decode failed")
+
+    with pytest.raises(BentoError, match="decode failed"):
+        client._with_retry(fail)
+
+    assert sleeps == []
 
 
 def test_sdk_timeout_is_applied_to_metadata_and_timeseries_clients() -> None:
@@ -239,6 +277,32 @@ def test_sdk_timeout_is_applied_to_metadata_and_timeseries_clients() -> None:
     assert client.metadata.TIMEOUT == 12.5
     assert client.timeseries.TIMEOUT == 12.5
     assert Api.TIMEOUT == 100.0
+
+
+def test_sdk_timeout_warning_when_api_surface_lacks_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class Logger:
+        def warning(self, event: str, **kwargs: object) -> None:
+            events.append((event, kwargs))
+
+    class Historical:
+        metadata = object()
+        timeseries = None
+
+    monkeypatch.setattr(
+        "databento_stream_downloader.databento_client.LOGGER",
+        Logger(),
+    )
+
+    _apply_sdk_timeout(cast("Any", Historical()), 12.5)
+
+    assert [event for event, _kwargs in events] == [
+        "sdk_timeout_not_applied",
+        "sdk_timeout_not_applied",
+    ]
 
 
 def test_sdk_timeout_contract_matches_pinned_databento_sdk(
@@ -261,6 +325,34 @@ def test_sdk_timeout_contract_matches_pinned_databento_sdk(
     assert client.metadata.TIMEOUT == 12.5
     assert client.timeseries.TIMEOUT == 12.5
     assert not any(event == "sdk_timeout_not_applied" for event, _kwargs in events)
+
+
+def test_thread_local_client_is_created_once_per_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[str] = []
+
+    class Api:
+        TIMEOUT = 100.0
+
+    class Historical:
+        def __init__(self, *, key: str) -> None:
+            created.append(key)
+            self.metadata = Api()
+            self.timeseries = Api()
+
+    monkeypatch.setattr(
+        "databento_stream_downloader.databento_client.databento.Historical",
+        Historical,
+    )
+    client = DatabentoClient("test-key", request_timeout_seconds=12.5)
+
+    first = client._client()
+    second = client._client()
+
+    assert first is second
+    assert created == ["test-key"]
+    assert first.metadata.TIMEOUT == 12.5
 
 
 @pytest.mark.parametrize(
@@ -347,6 +439,146 @@ def test_stream_to_file_rejects_invalid_422_as_fatal(
 
     with pytest.raises(FatalError, match="Databento rejected request"):
         client.stream_to_file(query, tmp_path / "out.dbn.zst")
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (401, "authentication failed"),
+        (402, "insufficient funds"),
+        (403, "access denied"),
+    ],
+)
+def test_stream_to_file_classifies_account_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status: int,
+    message: str,
+) -> None:
+    client = _client(sleeps=[])
+    query = StreamQuery(
+        dataset="GLBX.MDP3",
+        symbol="ES.FUT",
+        schema="mbo",
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 2),
+    )
+
+    class Timeseries:
+        def get_range(self, **_kwargs: object) -> None:
+            raise BentoClientError(http_status=status, message="account")
+
+    class Historical:
+        timeseries = Timeseries()
+
+    monkeypatch.setattr(client, "_client", lambda: Historical())
+
+    with pytest.raises(FatalError, match=message):
+        client.stream_to_file(query, tmp_path / "out.dbn.zst")
+
+
+def test_estimate_cost_classifies_structured_client_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(sleeps=[])
+
+    class Metadata:
+        def get_cost(self, **_kwargs: object) -> float:
+            raise BentoClientError(http_status=401, message="bad key")
+
+    class Historical:
+        metadata = Metadata()
+
+    monkeypatch.setattr(client, "_client", lambda: Historical())
+
+    with pytest.raises(FatalError, match="authentication failed"):
+        client.estimate_cost(
+            CostQuery(
+                dataset="GLBX.MDP3",
+                symbol="ES.FUT",
+                schema="mbo",
+                start=date(2026, 4, 1),
+                end=date(2026, 4, 2),
+            )
+        )
+
+
+def test_estimate_cost_wraps_unstructured_bento_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(sleeps=[])
+
+    class Metadata:
+        def get_cost(self, **_kwargs: object) -> float:
+            raise BentoError("metadata decode failed")
+
+    class Historical:
+        metadata = Metadata()
+
+    monkeypatch.setattr(client, "_client", lambda: Historical())
+
+    with pytest.raises(FatalError, match="metadata decode failed"):
+        client.estimate_cost(
+            CostQuery(
+                dataset="GLBX.MDP3",
+                symbol="ES.FUT",
+                schema="mbo",
+                start=date(2026, 4, 1),
+                end=date(2026, 4, 2),
+            )
+        )
+
+
+def test_estimate_size_classifies_structured_client_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(sleeps=[])
+
+    class Metadata:
+        def get_billable_size(self, **_kwargs: object) -> int:
+            raise BentoClientError(http_status=403, message="denied")
+
+    class Historical:
+        metadata = Metadata()
+
+    monkeypatch.setattr(client, "_client", lambda: Historical())
+
+    with pytest.raises(FatalError, match="access denied"):
+        client.estimate_size(
+            CostQuery(
+                dataset="GLBX.MDP3",
+                symbol="ES.FUT",
+                schema="mbo",
+                start=date(2026, 4, 1),
+                end=date(2026, 4, 2),
+            )
+        )
+
+
+def test_estimate_size_wraps_unstructured_bento_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(sleeps=[])
+
+    class Metadata:
+        def get_billable_size(self, **_kwargs: object) -> int:
+            raise BentoError("metadata decode failed")
+
+    class Historical:
+        metadata = Metadata()
+
+    monkeypatch.setattr(client, "_client", lambda: Historical())
+
+    with pytest.raises(FatalError, match="metadata decode failed"):
+        client.estimate_size(
+            CostQuery(
+                dataset="GLBX.MDP3",
+                symbol="ES.FUT",
+                schema="mbo",
+                start=date(2026, 4, 1),
+                end=date(2026, 4, 2),
+            )
+        )
 
 
 def test_client_methods_delegate_to_sdk_shape(

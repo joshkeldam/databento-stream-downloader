@@ -17,8 +17,11 @@ from pydantic import ValidationError as PydanticValidationError
 from databento_stream_downloader import cli
 from databento_stream_downloader.config import DownloadConfig
 from databento_stream_downloader.errors import (
+    FatalAPIError,
     FatalConfigError,
+    FatalError,
     InterruptedDownloadError,
+    ShutdownRequestedError,
 )
 from databento_stream_downloader.settings import EnvSettings
 
@@ -42,8 +45,19 @@ def test_parse_nonnegative_int_and_workers() -> None:
 
     with pytest.raises(argparse.ArgumentTypeError, match="non-negative"):
         cli._parse_nonnegative_int("-1")
+    with pytest.raises(argparse.ArgumentTypeError, match="Invalid integer"):
+        cli._parse_nonnegative_int("abc")
     with pytest.raises(argparse.ArgumentTypeError, match="between 1 and 50"):
         cli._parse_workers("100")
+
+
+def test_parse_positive_float_rejects_invalid_values() -> None:
+    assert cli._parse_positive_float("12.5") == 12.5
+
+    with pytest.raises(argparse.ArgumentTypeError, match="Invalid float"):
+        cli._parse_positive_float("not-float")
+    with pytest.raises(argparse.ArgumentTypeError, match="positive float"):
+        cli._parse_positive_float("0")
 
 
 def test_build_config_uses_env_settings_for_cost_cap(tmp_path: Path) -> None:
@@ -155,6 +169,18 @@ def test_env_settings_normalizes_blank_api_key() -> None:
     assert EnvSettings(api_key=" ").api_key is None
 
 
+def test_default_symbols_failure_maps_to_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_default_symbols() -> tuple[str, ...]:
+        raise RuntimeError("bad universe")
+
+    monkeypatch.setattr(cli, "load_default_symbols", fail_default_symbols)
+
+    with pytest.raises(FatalConfigError, match="default symbol universe is invalid"):
+        cli._default_symbols()
+
+
 def test_main_exits_when_api_key_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -216,6 +242,74 @@ def test_main_missing_api_key_prints_compact_error(
     captured = capsys.readouterr()
     assert "DATABENTO_API_KEY is not configured" in captured.err
     assert "usage:" not in captured.err
+
+
+def test_main_maps_pydantic_validation_to_parser_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "key")
+    monkeypatch.setattr(cli, "load_dotenv", _skip_dotenv)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "databento-stream-downloader",
+            "--symbol",
+            "ES",
+            "--schemas",
+            "definition",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert "symbols" in captured.err
+
+
+def test_main_maps_default_symbol_failure_to_exit_2(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    def fail_default_symbols() -> tuple[str, ...]:
+        raise RuntimeError("bad universe")
+
+    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "load_dotenv", _skip_dotenv)
+    monkeypatch.setattr(cli, "load_default_symbols", fail_default_symbols)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "databento-stream-downloader",
+            "--schemas",
+            "definition",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert "default symbol universe is invalid" in captured.err
 
 
 def test_main_allows_validate_only_without_api_key(
@@ -345,6 +439,46 @@ def test_show_retries_flows_through_cli_main(
     assert cast("DownloadConfig", configs[0]).show_retries is True
 
 
+def test_high_worker_count_warning_is_visible(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "key")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "databento-stream-downloader",
+            "--symbol",
+            "ES.FUT",
+            "--schemas",
+            "definition",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--data-dir",
+            str(tmp_path),
+            "--max-cost-cents",
+            "1",
+            "--workers",
+            "9",
+            "--yes",
+        ],
+    )
+
+    def fake_run_download(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "run_download", fake_run_download)
+
+    cli.main()
+
+    captured = capsys.readouterr()
+    assert "high worker count configured" in captured.err
+
+
 def test_signal_handler_context_restores_previous_handler() -> None:
     if not hasattr(signal, "SIGTERM"):
         pytest.skip("SIGTERM is not available on this platform")
@@ -377,7 +511,7 @@ def test_main_maps_config_failure_to_exit_2(
             "--data-dir",
             str(tmp_path),
             "--max-cost-cents",
-            "0",
+            "1",
             "--yes",
         ],
     )
@@ -432,3 +566,94 @@ def test_main_interrupt_prints_clean_message_and_exits_normally(
     assert exc_info.value.code == 130
     assert "Interrupted. Stopping downloader" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_main_shutdown_request_exits_143(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "key")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "databento-stream-downloader",
+            "--symbol",
+            "ES.FUT",
+            "--schemas",
+            "definition",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--data-dir",
+            str(tmp_path),
+            "--max-cost-cents",
+            "1",
+            "--yes",
+        ],
+    )
+
+    def shutdown(*_args: object, **_kwargs: object) -> None:
+        raise ShutdownRequestedError("term")
+
+    monkeypatch.setattr(cli, "run_download", shutdown)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 143
+    assert "Shutdown requested" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("error", "exit_code", "label"),
+    [
+        (FatalAPIError("api failed"), 1, "Fatal API"),
+        (FatalError("fatal failed"), 1, "Fatal"),
+        (RuntimeError("bug"), 4, "Unexpected failure"),
+    ],
+)
+def test_main_maps_terminal_error_arms(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    error: Exception,
+    exit_code: int,
+    label: str,
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "key")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "databento-stream-downloader",
+            "--symbol",
+            "ES.FUT",
+            "--schemas",
+            "definition",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--data-dir",
+            str(tmp_path),
+            "--max-cost-cents",
+            "1",
+            "--yes",
+        ],
+    )
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(cli, "run_download", fail)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == exit_code
+    assert label in captured.err

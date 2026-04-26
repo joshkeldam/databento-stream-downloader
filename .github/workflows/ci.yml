@@ -56,13 +56,15 @@ jobs:
         run: uv run --locked ruff check .
 
       - name: Typecheck
-        run: uv run --locked basedpyright src tests
+        run: uv run --locked basedpyright src tests scripts
 
       - name: Version check
         run: uv run --locked python scripts/check_version.py
 
       - name: Test
-        run: uv run --locked pytest --cov=databento_stream_downloader --cov-report=term-missing --cov-fail-under=86
+        run: |
+          uv run --locked pytest --cov=databento_stream_downloader --cov-report=term-missing --cov-report=json:.coverage.json --cov-fail-under=92
+          uv run --locked python scripts/check_coverage_floors.py .coverage.json
 
       - name: Dependency audit
         run: |

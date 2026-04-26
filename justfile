@@ -11,7 +11,7 @@ lint:
   uv run --locked ruff check .
 
 typecheck:
-  uv run --locked basedpyright src tests
+  uv run --locked basedpyright src tests scripts
 
 version-check:
   uv run --locked python scripts/check_version.py
@@ -23,7 +23,8 @@ test-properties:
   uv run --locked pytest tests/test_properties.py
 
 test-cov:
-  uv run --locked pytest --cov=databento_stream_downloader --cov-report=term-missing --cov-fail-under=86
+  uv run --locked pytest --cov=databento_stream_downloader --cov-report=term-missing --cov-report=json:.coverage.json --cov-fail-under=92
+  uv run --locked python scripts/check_coverage_floors.py .coverage.json
 
 audit:
   uv export --format requirements-txt --locked --no-hashes --no-dev --output-file .audit-requirements.txt
@@ -39,6 +40,6 @@ build:
   uv build
 
 clean:
-  rm -rf dist .coverage .hypothesis .pytest_cache .ruff_cache .basedpyright .smoke-venv .audit-requirements.txt
+  rm -rf dist .coverage .coverage.json .hypothesis .pytest_cache .ruff_cache .basedpyright .smoke-venv .audit-requirements.txt
 
 check: clean lock sync lint typecheck version-check test-cov audit pre-commit build

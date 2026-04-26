@@ -1,18 +1,28 @@
 """Tests for standalone downloader configuration."""
+# pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
 import argparse
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 import databento_stream_downloader as dsd
+from databento_stream_downloader import symbols as symbols_module
 from databento_stream_downloader.cli import build_config
 from databento_stream_downloader.config import DownloadConfig, RunMode
+from databento_stream_downloader.errors import FatalAPIError
 from databento_stream_downloader.paths import canonical_path
+from databento_stream_downloader.pricing import (
+    decimal_dollars_to_cents,
+    dollars_to_decimal,
+)
+from databento_stream_downloader.settings import EnvSettings
 from databento_stream_downloader.symbols import (
     load_default_symbols,
     load_first_data_utc_dates,
@@ -34,6 +44,84 @@ def test_first_data_utc_dates_load_quoted_parent_symbols() -> None:
     assert first_data_utc["SOL.FUT"] == date(2025, 3, 17)
     assert first_data_utc["XRP.FUT"] == date(2025, 5, 19)
     assert "SOL" not in first_data_utc
+
+
+def test_default_symbol_loader_rejects_malformed_universe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def string_symbols() -> dict[str, object]:
+        return {"symbols": "ES.FUT"}
+
+    def non_string_symbols() -> dict[str, object]:
+        return {"symbols": [123]}
+
+    def invalid_symbols() -> dict[str, object]:
+        return {"symbols": ["ES"]}
+
+    monkeypatch.setattr(symbols_module, "_universe_data", string_symbols)
+
+    with pytest.raises(RuntimeError, match="symbols as a string list"):
+        load_default_symbols()
+
+    monkeypatch.setattr(symbols_module, "_universe_data", non_string_symbols)
+
+    with pytest.raises(RuntimeError, match="symbols must be strings"):
+        load_default_symbols()
+
+    monkeypatch.setattr(symbols_module, "_universe_data", invalid_symbols)
+
+    with pytest.raises(RuntimeError, match=r"invalid universe\.toml symbol"):
+        load_default_symbols()
+
+
+def test_first_data_loader_rejects_malformed_universe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def list_first_data() -> dict[str, object]:
+        return {"symbols": [], "first_data_utc": []}
+
+    def non_string_first_data() -> dict[str, object]:
+        return {"symbols": [], "first_data_utc": {1: "2026-04-01"}}
+
+    def invalid_symbol_first_data() -> dict[str, object]:
+        return {"symbols": [], "first_data_utc": {"ES": "2026-04-01"}}
+
+    def invalid_date_first_data() -> dict[str, object]:
+        return {"symbols": [], "first_data_utc": {"ES.FUT": "bad-date"}}
+
+    monkeypatch.setattr(symbols_module, "_universe_data", list_first_data)
+
+    with pytest.raises(RuntimeError, match="first_data_utc must be a table"):
+        load_first_data_utc_dates()
+
+    monkeypatch.setattr(symbols_module, "_universe_data", non_string_first_data)
+
+    with pytest.raises(RuntimeError, match="entries must be strings"):
+        load_first_data_utc_dates()
+
+    monkeypatch.setattr(symbols_module, "_universe_data", invalid_symbol_first_data)
+
+    with pytest.raises(RuntimeError, match="invalid first_data_utc symbol"):
+        load_first_data_utc_dates()
+
+    monkeypatch.setattr(symbols_module, "_universe_data", invalid_date_first_data)
+
+    with pytest.raises(RuntimeError, match="invalid first_data_utc date"):
+        load_first_data_utc_dates()
+
+
+def test_pricing_rejects_malformed_estimates() -> None:
+    for value in ("not-a-decimal", 1, Decimal("NaN")):
+        with pytest.raises(FatalAPIError, match="invalid Databento cost estimate"):
+            dollars_to_decimal(cast("Any", value))
+
+    with pytest.raises(FatalAPIError, match="invalid Databento cost estimate"):
+        decimal_dollars_to_cents(Decimal("-0.01"))
+
+
+def test_env_settings_rejects_non_string_api_key() -> None:
+    with pytest.raises(PydanticValidationError, match="api_key must be a string"):
+        EnvSettings(api_key=cast("Any", 123))
 
 
 def test_canonical_path_matches_public_layout(tmp_path: Path) -> None:
