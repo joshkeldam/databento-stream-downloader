@@ -1,0 +1,191 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        python-version:
+          - "3.13"
+          - "3.14"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          version: "0.11.1"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Lint
+        run: uv run --locked ruff check .
+
+      - name: Typecheck
+        run: uv run --locked basedpyright src tests
+
+      - name: Version check
+        run: uv run --locked python scripts/check_version.py
+
+      - name: Test
+        run: uv run --locked pytest --cov=databento_stream_downloader --cov-report=term-missing --cov-fail-under=86
+
+      - name: Dependency audit
+        run: |
+          uv export --format requirements-txt --locked --no-hashes --no-dev --output-file .audit-requirements.txt
+          uv run --locked pip-audit -r .audit-requirements.txt --no-deps --disable-pip --skip-editable
+
+      - name: Generate SBOM
+        run: |
+          uv run --locked pip-audit -r .audit-requirements.txt --no-deps --disable-pip --skip-editable --format cyclonedx-json --output sbom.cdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v6
+        with:
+          name: sbom-${{ matrix.os }}-${{ matrix.python-version }}
+          path: sbom.cdx.json
+
+      - name: Pre-commit
+        run: uv run --locked pre-commit run --all-files
+
+      - name: Build package
+        run: uv build
+
+      - name: Smoke test wheel
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+          import sys
+          import textwrap
+          import venv
+
+          root = pathlib.Path.cwd()
+          env = root / ".smoke-venv"
+          venv.EnvBuilder(with_pip=True).create(env)
+          scripts = "Scripts" if os.name == "nt" else "bin"
+          python = env / scripts / ("python.exe" if os.name == "nt" else "python")
+          cli = env / scripts / (
+              "databento-stream-downloader.exe"
+              if os.name == "nt"
+              else "databento-stream-downloader"
+          )
+          wheel = next((root / "dist").glob("*.whl"))
+          subprocess.run([str(python), "-m", "pip", "install", str(wheel)], check=True)
+          subprocess.run([str(cli), "--version"], check=True)
+          subprocess.run([str(cli), "--help"], check=True)
+          strict_script = textwrap.dedent(r'''
+          from collections.abc import Sequence
+          from dataclasses import dataclass
+          from datetime import date
+          from pathlib import Path
+          from typing import cast
+          import tempfile
+
+          import databento_dbn
+          import zstandard
+          from databento_dbn.metadata import SymbolMapping
+
+          from databento_stream_downloader.dbn import validate_dbn_metadata
+          from databento_stream_downloader.models import StreamQuery
+
+          @dataclass
+          class MappingInterval:
+              start_date: date
+              end_date: date
+              symbol: str
+
+          @dataclass
+          class Mapping:
+              raw_symbol: str
+              intervals: Sequence[MappingInterval]
+
+          query = StreamQuery(
+              dataset="GLBX.MDP3",
+              symbol="ES.FUT",
+              schema="mbo",
+              start=date(2026, 4, 1),
+              end=date(2026, 4, 2),
+          )
+          start_ns = 1775001600000000000
+          metadata = databento_dbn.Metadata(
+              dataset="GLBX.MDP3",
+              start=start_ns,
+              end=1775088000000000000,
+              stype_in=databento_dbn.SType.from_str("parent"),
+              stype_out=databento_dbn.SType.from_str("instrument_id"),
+              schema=databento_dbn.Schema.from_str("mbo"),
+              symbols=["ES.FUT"],
+              mappings=cast(
+                  "Sequence[SymbolMapping]",
+                  [
+                      Mapping(
+                          raw_symbol="ESM6",
+                          intervals=[
+                              MappingInterval(
+                                  start_date=date(2026, 4, 1),
+                                  end_date=date(2026, 4, 2),
+                                  symbol="123",
+                              )
+                          ],
+                      )
+                  ],
+              ),
+          )
+          records = [
+              databento_dbn.MBOMsg(
+                  1, 123, start_ns, 111, 1000000000, 1,
+                  databento_dbn.Action.from_str("A"),
+                  databento_dbn.Side.from_str("B"),
+                  start_ns + 1,
+              ),
+              databento_dbn.MBOMsg(
+                  1, 123, start_ns + 2, 112, 1000000001, 1,
+                  databento_dbn.Action.from_str("A"),
+                  databento_dbn.Side.from_str("B"),
+                  start_ns + 3,
+              ),
+          ]
+          with tempfile.TemporaryDirectory() as directory:
+              path = Path(directory) / "sample.dbn.zst"
+              payload = metadata.encode() + b"".join(bytes(record) for record in records)
+              path.write_bytes(zstandard.ZstdCompressor().compress(payload))
+              validate_dbn_metadata(query, path, strict=True)
+          ''')
+          subprocess.run([str(python), "-c", strict_script], check=True)
+          PY

@@ -1,0 +1,101 @@
+[build-system]
+requires = ["hatchling==1.28.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "databento-stream-downloader"
+version = "0.2.0"
+description = "Standalone Databento historical stream downloader"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13,<3.15"
+keywords = ["databento", "futures", "market-data", "dbn", "downloader"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Financial and Insurance Industry",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = [
+  "databento==0.75.0",
+  "databento-dbn==0.53.0",
+  "numpy==2.4.4",
+  "pydantic==2.13.3",
+  "pydantic-settings==2.12.0",
+  "python-dotenv==1.2.2",
+  "rich==15.0.0",
+  "structlog==25.5.0",
+  "zstandard==0.25.0",
+]
+
+[project.scripts]
+databento-stream-downloader = "databento_stream_downloader.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/joshkeldam/databento-stream-downloader"
+Documentation = "https://github.com/joshkeldam/databento-stream-downloader#readme"
+Source = "https://github.com/joshkeldam/databento-stream-downloader"
+Issues = "https://github.com/joshkeldam/databento-stream-downloader/issues"
+Changelog = "https://github.com/joshkeldam/databento-stream-downloader/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+  "basedpyright==1.39.3",
+  "hypothesis==6.148.2",
+  "pip-audit==2.9.0",
+  "pre-commit==4.5.0",
+  "pytest==9.0.3",
+  "pytest-cov==7.0.0",
+  "ruff==0.15.12",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/databento_stream_downloader"]
+artifacts = ["src/databento_stream_downloader/universe.toml", "src/databento_stream_downloader/py.typed"]
+
+[tool.ruff]
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "W",
+  "I",
+  "UP",
+  "B",
+  "C4",
+  "PT",
+  "RUF",
+  "DTZ",
+  "ARG",
+  "SIM",
+  "N",
+  "S",
+  "PERF",
+  "LOG",
+  "T20",
+]
+ignore = [
+  "S101",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["ARG"]
+
+[tool.basedpyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-config --strict-markers"
+markers = [
+  "slow: slower filesystem or integration-style checks",
+  "integration: tests that touch external services or recorded SDK fixtures",
+]
