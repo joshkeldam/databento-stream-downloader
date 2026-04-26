@@ -46,7 +46,7 @@ Changelog = "https://github.com/joshkeldam/databento-stream-downloader/blob/main
 dev = [
   "basedpyright==1.39.3",
   "hypothesis==6.148.2",
-  "pip-audit==2.9.0",
+  "pip-audit==2.10.0",
   "pre-commit==4.5.0",
   "pytest==9.0.3",
   "pytest-cov==7.0.0",
