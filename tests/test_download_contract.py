@@ -775,6 +775,19 @@ def test_zero_cost_cap_requires_explicit_free_only_mode(tmp_path: Path) -> None:
     assert "allow-free-only" in console.export_text()
 
 
+def test_bucket_cost_caps_share_zero_cap_refusal(tmp_path: Path) -> None:
+    config = _config(tmp_path).model_copy(
+        update={"max_cost_cents": 0, "allow_free_only": False}
+    )
+    console = Console(record=True)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _check_bucket_cost_caps(config, [], console)
+
+    assert exc_info.value.code == 2
+    assert "allow-free-only" in console.export_text()
+
+
 def test_zero_cost_cap_allows_explicit_free_only_estimate(tmp_path: Path) -> None:
     config = _config(tmp_path).model_copy(
         update={"max_cost_cents": 0, "allow_free_only": True}

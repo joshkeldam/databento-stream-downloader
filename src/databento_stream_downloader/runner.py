@@ -342,13 +342,7 @@ def _check_cost_cap(
             "[/bold red]"
         )
         raise SystemExit(2)
-    if config.max_cost_cents == 0 and not config.allow_free_only:
-        console.print(
-            "[bold red]Refusing ambiguous zero planning cap:[/bold red] "
-            "pass --allow-free-only with --max-cost-cents 0 for intentionally "
-            "free-only runs."
-        )
-        raise SystemExit(2)
+    _refuse_ambiguous_zero_cap(config, console)
     if total_cents > config.max_cost_cents:
         console.print(
             "[bold red]Estimated cost exceeds planning cap:[/bold red] "
@@ -358,11 +352,7 @@ def _check_cost_cap(
         raise SystemExit(2)
 
 
-def _check_bucket_cost_caps(
-    config: DownloadConfig,
-    estimates: list[CostEstimate],
-    console: Console,
-) -> None:
+def _refuse_ambiguous_zero_cap(config: DownloadConfig, console: Console) -> None:
     if config.max_cost_cents == 0 and not config.allow_free_only:
         console.print(
             "[bold red]Refusing ambiguous zero planning cap:[/bold red] "
@@ -370,6 +360,14 @@ def _check_bucket_cost_caps(
             "free-only runs."
         )
         raise SystemExit(2)
+
+
+def _check_bucket_cost_caps(
+    config: DownloadConfig,
+    estimates: list[CostEstimate],
+    console: Console,
+) -> None:
+    _refuse_ambiguous_zero_cap(config, console)
     for estimate in estimates:
         label = f"{estimate.symbol}/{estimate.schema}"
         if (
