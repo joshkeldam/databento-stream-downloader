@@ -87,6 +87,7 @@ from databento_stream_downloader._runner.work import (
     _existing_items,
     _sorted_items,
     _total_partitions,
+    _warn_if_suspicious_archive_file,
     _warn_suspicious_archive_files,
     _work_items_from_all,
 )
@@ -162,6 +163,7 @@ __all__ = [
     "_validate_one",
     "_validate_runtime_config",
     "_validate_sha256_sidecar",
+    "_warn_if_suspicious_archive_file",
     "_warn_suspicious_archive_files",
     "_work_items_from_all",
     "_write_run_ledger",

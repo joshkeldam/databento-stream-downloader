@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
@@ -1590,10 +1590,21 @@ def test_existing_items_ignores_unparseable_and_tmp_names(
     (directory / ".2026-04-02.dbn.zst.tmp").write_bytes(b"tmp")
     (directory / "2026-04-03.dbn.zst.tmp").write_bytes(b"tmp")
     (directory / "2026-04-03.dbn.zst.bak").write_bytes(b"backup")
+    iterdir_calls = 0
+    original_iterdir = Path.iterdir
+
+    def counting_iterdir(path: Path) -> Iterator[Path]:
+        nonlocal iterdir_calls
+        if path == directory:
+            iterdir_calls += 1
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
 
     existing = _existing_items(config)
 
     assert existing == {WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))}
+    assert iterdir_calls == 1
     assert events == [
         (
             "suspicious_archive_file_ignored",

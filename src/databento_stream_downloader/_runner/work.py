@@ -59,8 +59,10 @@ def _existing_items(config: DownloadConfig) -> set[WorkItem]:
             directory = config.data_dir / RAW_PREFIX / symbol / schema
             if not directory.exists():
                 continue
-            _warn_suspicious_archive_files(directory)
-            for path in directory.glob("*.dbn.zst"):
+            for path in directory.iterdir():
+                _warn_if_suspicious_archive_file(path)
+                if not path.name.endswith(".dbn.zst"):
+                    continue
                 try:
                     day = date.fromisoformat(path.name.removesuffix(".dbn.zst"))
                 except ValueError:
@@ -72,15 +74,19 @@ def _existing_items(config: DownloadConfig) -> set[WorkItem]:
 
 def _warn_suspicious_archive_files(directory: Path) -> None:
     for path in directory.iterdir():
-        name = path.name
-        if (
-            ".dbn.zst" in name
-            and not name.endswith(".dbn.zst")
-            and not name.endswith(".dbn.zst.sha256")
-            and not name.endswith(".tmp")
-            and not name.startswith(".")
-        ):
-            LOGGER.warning("suspicious_archive_file_ignored", path=str(path))
+        _warn_if_suspicious_archive_file(path)
+
+
+def _warn_if_suspicious_archive_file(path: Path) -> None:
+    name = path.name
+    if (
+        ".dbn.zst" in name
+        and not name.endswith(".dbn.zst")
+        and not name.endswith(".dbn.zst.sha256")
+        and not name.endswith(".tmp")
+        and not name.startswith(".")
+    ):
+        LOGGER.warning("suspicious_archive_file_ignored", path=str(path))
 
 
 def _total_partitions(config: DownloadConfig) -> int:
@@ -112,6 +118,7 @@ __all__ = [
     "_existing_items",
     "_sorted_items",
     "_total_partitions",
+    "_warn_if_suspicious_archive_file",
     "_warn_suspicious_archive_files",
     "_work_items_from_all",
 ]

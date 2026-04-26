@@ -17,6 +17,8 @@ for repository tags even though it is intended to be cloned and run locally.
 - Runner internals are split into lifecycle, filesystem, cost, streaming,
   validation, ledger, work-discovery, formatting, and shared-type modules while
   preserving the public `databento_stream_downloader.runner` import path.
+- Existing-archive discovery now classifies each symbol/schema directory in a
+  single pass instead of warning and globbing in two separate scans.
 
 ## [0.2.0] - 2026-04-26
 
