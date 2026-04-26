@@ -8,6 +8,8 @@
 
 ## Data Integrity Impact
 
-- [ ] No change to canonical file layout
-- [ ] No change to validation semantics
-- [ ] No change to cost-cap behavior
+- Canonical file layout:
+- Validation semantics:
+- Cost-cap behavior:
+
+Write `None` for any area that is unchanged.
