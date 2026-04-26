@@ -66,6 +66,21 @@ def test_parent_symbol_validation_allows_longer_safe_codes(tmp_path: Path) -> No
     assert config.symbols == ("BRRNY.FUT",)
 
 
+def test_parent_symbol_validation_rejects_overlong_codes(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="invalid parent futures symbol"):
+        canonical_path(tmp_path, "ABCDEF.FUT", "mbo", date(2026, 4, 24))
+
+    with pytest.raises(PydanticValidationError, match="invalid parent futures symbols"):
+        DownloadConfig(
+            data_dir=tmp_path,
+            symbols=("ABCDEF.FUT",),
+            schemas=("mbo",),
+            start=date(2026, 4, 24),
+            end=date(2026, 4, 24),
+            mode=RunMode.DRY_RUN,
+        )
+
+
 def test_canonical_path_resolves_data_dir_segments(tmp_path: Path) -> None:
     nested = tmp_path / "nested"
     data_dir = nested / ".." / "archive"

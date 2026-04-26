@@ -97,7 +97,7 @@ for repository tags even though it is intended to be cloned and run locally.
   of being folded into ordinary per-partition failures.
 - Databento retry counters are synchronized across worker threads and persisted
   in ledger v2 records.
-- Parent-symbol validation is tightened to one-to-four alphanumeric characters
+- Parent-symbol validation is tightened to one-to-five alphanumeric characters
   before `.FUT`.
 - The package targets Python `>=3.13,<3.15` and is tested on Python 3.13 and
   3.14 in CI.
