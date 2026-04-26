@@ -11,6 +11,15 @@ for repository tags even though it is intended to be cloned and run locally.
 
 - Ledger v4 records now include `exit_code`, `interrupted`, stream retry counts,
   estimated stream attempts, and terminal outcomes for post-run forensics.
+- New `databento-stream-sync` console script (with `push` and `pull`
+  subcommands) mirrors the local archive to/from S3 with the same Rich Live
+  UI as the downloader. Reads bucket/prefix/region from `DATABENTO_S3_BUCKET`,
+  `DATABENTO_S3_PREFIX`, `DATABENTO_S3_REGION` (or matching CLI flags) and
+  uses the standard boto3 credential chain. Diff detection is size-based;
+  `--verify-sha256` cross-checks local `.sha256` sidecars against
+  `Metadata.sha256` written during prior pushes. `--delete` is opt-in and
+  requires typed `delete` confirmation. `--fsync-writes` (pull only) and
+  `--dry-run` mirror the downloader. Wired up as `just s3 push|pull`.
 
 ### Changed
 

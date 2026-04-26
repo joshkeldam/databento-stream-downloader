@@ -121,6 +121,41 @@ still applies, so no half-files are visible — but recently written files may b
 lost on power loss). All four are recoverable: re-run the download. The run is
 incremental.
 
+## Syncing to S3
+
+`databento-stream-sync` mirrors the local archive to (or from) an S3 bucket
+with the same Live UI as the downloader. Two subcommands cover the
+directions:
+
+```bash
+just s3 push --workers 50          # local → s3
+just s3 pull --workers 50          # s3   → local
+just s3 push --dry-run             # plan, no transfer
+just s3 pull --delete              # remove local files not in s3
+```
+
+S3 keys mirror the archive layout with the leading `data/` stripped:
+`data/raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst` ↔
+`s3://{bucket}/raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst`. An optional
+`DATABENTO_S3_PREFIX` is prepended after stripping `data/`.
+
+Configuration is taken from `--bucket / --prefix / --region` flags or
+`DATABENTO_S3_BUCKET / DATABENTO_S3_PREFIX / DATABENTO_S3_REGION` env vars.
+AWS credentials follow the standard boto3 chain (env vars,
+`~/.aws/credentials`, instance profile).
+
+Difference detection is size-based and idempotent: a re-run uploads or
+downloads nothing. `--verify-sha256` additionally cross-checks the local
+`.sha256` sidecar against the `Metadata.sha256` set during the original
+push. `--delete` is opt-in and requires the user to type `delete` (not
+just `y`) at the confirmation prompt; the standard `Proceed? [y/N]`
+applies to transfer-only runs. `--fsync-writes` is pull-only and brings
+back the same fsync posture available to the downloader.
+
+The default cap of `--workers` is `4` and the hard maximum is `100`,
+matching the downloader. Throughput is byte-based in the Live UI, so the
+ETA reflects bytes-remaining and not just file-count remaining.
+
 When `--symbols` is omitted, the downloader uses the default CME futures
 universe in `src/databento_stream_downloader/universe.toml`. That file also
 contains first UTC data days for newer products. Requested ranges are clipped

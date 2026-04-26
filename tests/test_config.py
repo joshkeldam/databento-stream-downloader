@@ -37,6 +37,31 @@ def test_default_symbols_include_requested_universe() -> None:
     assert "MWN.FUT" in symbols
 
 
+def test_env_settings_normalize_s3_fields() -> None:
+    """Ensures the optional-string and prefix validators behave as documented."""
+    from databento_stream_downloader.settings import EnvSettings
+
+    populated = EnvSettings(
+        api_key="key",
+        s3_bucket="  my-bucket  ",
+        s3_region="  us-east-1  ",
+        s3_prefix="  /archives/databento/  ",
+    )
+    assert populated.s3_bucket == "my-bucket"
+    assert populated.s3_region == "us-east-1"
+    assert populated.s3_prefix == "archives/databento"
+
+    empty = EnvSettings(s3_bucket="   ", s3_region="", s3_prefix=None)  # type: ignore[arg-type]
+    assert empty.s3_bucket is None
+    assert empty.s3_region is None
+    assert empty.s3_prefix == ""
+
+    with pytest.raises(PydanticValidationError):
+        EnvSettings(s3_bucket=123)  # type: ignore[arg-type]
+    with pytest.raises(PydanticValidationError):
+        EnvSettings(s3_prefix=42)  # type: ignore[arg-type]
+
+
 def test_first_data_utc_dates_load_quoted_parent_symbols() -> None:
     first_data_utc = load_first_data_utc_dates()
 

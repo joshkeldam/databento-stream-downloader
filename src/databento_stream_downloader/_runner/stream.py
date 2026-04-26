@@ -24,7 +24,10 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from databento_stream_downloader._runner.concurrency import _cancel_futures
+from databento_stream_downloader._runner.concurrency import (
+    _cancel_futures,
+    _InFlightRegistry,
+)
 from databento_stream_downloader._runner.format import _money
 from databento_stream_downloader._runner.fsio import _place_tmp, _write_sha256_sidecar
 from databento_stream_downloader._runner.types import (
@@ -32,7 +35,6 @@ from databento_stream_downloader._runner.types import (
     DownloadOutcome,
     WorkItem,
     _DirectoryFsyncTracker,
-    _InFlightTracker,
 )
 from databento_stream_downloader._runner.validation import (
     _raise_on_suspicious_all_no_data,
@@ -80,7 +82,7 @@ class _OutcomeCounts:
 
 def _render_progress_panel(
     progress: Progress,
-    tracker: _InFlightTracker,
+    tracker: _InFlightRegistry[WorkItem],
     counts: _OutcomeCounts,
     max_workers: int,
 ) -> Panel:
@@ -167,7 +169,7 @@ def _stream_missing(
 
     quiet = bool(getattr(console, "quiet", False))
     progress = _build_progress(quiet, console)
-    in_flight_tracker = _InFlightTracker()
+    in_flight_tracker = _InFlightRegistry[WorkItem]()
     counts = _OutcomeCounts()
 
     pool = ThreadPoolExecutor(max_workers=config.max_workers)
@@ -336,7 +338,7 @@ def _stream_one(
     item: WorkItem,
     estimated_billable_bytes: int | None = None,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
-    in_flight: _InFlightTracker | None = None,
+    in_flight: _InFlightRegistry[WorkItem] | None = None,
 ) -> tuple[DownloadOutcome, str]:
     day = item.day
     dest = canonical_path(config.data_dir, item.symbol, item.schema, day)

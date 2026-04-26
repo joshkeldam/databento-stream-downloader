@@ -1,6 +1,9 @@
 databento *args:
   uv run databento-stream-downloader {{args}}
 
+s3 *args:
+  uv run databento-stream-sync {{args}}
+
 lock:
   uv lock --check
 

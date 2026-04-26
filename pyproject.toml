@@ -20,6 +20,8 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "boto3==1.42.96",
+  "botocore==1.42.96",
   "databento==0.75.0",
   "databento-dbn==0.53.0",
   "numpy==2.4.4",
@@ -33,6 +35,7 @@ dependencies = [
 
 [project.scripts]
 databento-stream-downloader = "databento_stream_downloader.cli:main"
+databento-stream-sync = "databento_stream_downloader.sync_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/joshkeldam/databento-stream-downloader"
@@ -44,7 +47,9 @@ Changelog = "https://github.com/joshkeldam/databento-stream-downloader/blob/main
 [dependency-groups]
 dev = [
   "basedpyright==1.39.3",
+  "boto3-stubs[s3]==1.42.96",
   "hypothesis==6.148.2",
+  "moto[s3]==5.1.22",
   "pip-audit==2.9.0",
   "pre-commit==4.5.0",
   "pytest==9.0.3",
