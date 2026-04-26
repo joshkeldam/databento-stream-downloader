@@ -996,7 +996,10 @@ def test_windows_lock_uses_same_byte_for_acquire_and_release(
     finally:
         lock_file.close()
 
-    assert offsets == [("lock", 0), ("unlock", 0)]
+    assert offsets == [
+        ("lock", runner._WINDOWS_LOCK_OFFSET),
+        ("unlock", runner._WINDOWS_LOCK_OFFSET),
+    ]
 
 
 def test_run_download_validates_cached_files_without_prompt(tmp_path: Path) -> None:
@@ -1368,8 +1371,8 @@ def test_repair_rejects_valid_but_mismatched_sidecar(tmp_path: Path) -> None:
     )
 
     assert issues == 1
-    assert _sha256_sidecar_path(path).read_text(encoding="ascii").startswith(
-        stale_digest
+    assert (
+        _sha256_sidecar_path(path).read_text(encoding="ascii").startswith(stale_digest)
     )
 
 
@@ -1515,9 +1518,7 @@ def test_existing_items_ignores_unparseable_and_tmp_names(
 
     existing = _existing_items(config)
 
-    assert existing == {
-        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))
-    }
+    assert existing == {WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))}
     assert events == [
         (
             "suspicious_archive_file_ignored",

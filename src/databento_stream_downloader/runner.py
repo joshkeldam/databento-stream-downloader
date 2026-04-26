@@ -66,6 +66,7 @@ _TMP_GLOB = ".*.tmp"
 _TMP_MIN_AGE_SECONDS = 5 * 60
 _LEDGER_FILE = "download-ledger.jsonl"
 _LOCK_FILE = ".run.lock"
+_WINDOWS_LOCK_OFFSET = 1 << 20
 _BUCKET_COST_WARN_FRACTION = Decimal("0.25")
 _NETWORK_FILESYSTEM_TYPES = frozenset(
     {
@@ -261,12 +262,9 @@ def _run_download_locked(
         try:
             console.print(f"\nArchive: {config.data_dir}")
             console.print(
-                f"Estimated: {_bytes(total_bytes)}; "
-                f"{_money(total_cents)} planning cost"
+                f"Estimated: {_bytes(total_bytes)}; {_money(total_cents)} planning cost"
             )
-            answer = console.input(
-                "Proceed? [y/N] "
-            )
+            answer = console.input("Proceed? [y/N] ")
         except EOFError:
             error_console.print(_EOF_REFUSAL)
             raise SystemExit(2) from None
@@ -398,9 +396,7 @@ def _check_bucket_cost_caps(
                 raise SystemExit(2)
             continue
         warn_threshold = (
-            Decimal(config.max_cost_cents)
-            / Decimal(100)
-            * _BUCKET_COST_WARN_FRACTION
+            Decimal(config.max_cost_cents) / Decimal(100) * _BUCKET_COST_WARN_FRACTION
         )
         if estimate.cost_dollars > warn_threshold:
             console.print(
@@ -582,7 +578,7 @@ def _validate_runtime_config(
         raise FatalConfigError(msg)
     _reject_known_network_filesystem(config.data_dir)
     config.data_dir.mkdir(parents=True, exist_ok=True)
-    if config.data_dir.stat().st_mode & 0o002:
+    if os.name != "nt" and config.data_dir.stat().st_mode & 0o002:
         msg = f"data_dir must not be world-writable: {config.data_dir}"
         raise FatalConfigError(msg)
     fd, probe_name = tempfile.mkstemp(
@@ -646,10 +642,11 @@ def _try_lock_file(file: TextIO) -> bool:
         import msvcrt
 
         try:
-            file.seek(0)
+            file.seek(_WINDOWS_LOCK_OFFSET)
             msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
             return False
+        file.seek(0)
         return True
     import fcntl
 
@@ -665,10 +662,11 @@ def _unlock_file(file: TextIO) -> None:
         import msvcrt
 
         try:
-            file.seek(0)
+            file.seek(_WINDOWS_LOCK_OFFSET)
             msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
         except OSError:
             return
+        file.seek(0)
         return
     import fcntl
 
@@ -1014,7 +1012,8 @@ def _sha256_sidecar_path(path: Path) -> Path:
 
 def _fsync_and_sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as file:
+    mode = "r+b" if os.name == "nt" else "rb"
+    with path.open(mode) as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
         os.fsync(file.fileno())
