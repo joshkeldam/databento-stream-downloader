@@ -95,7 +95,7 @@ def _run_download(
     run_id = str(uuid.uuid4())
     run_started_at = _utc_now()
     fsync_tracker = _DirectoryFsyncTracker()
-    _validate_runtime_config(config, fsync_tracker)
+    _validate_runtime_config(config, fsync_tracker, error_console)
     with (
         _exclusive_run_lock(config.data_dir, run_id, error_console, fsync_tracker),
         structlog.contextvars.bound_contextvars(run_id=run_id),

@@ -221,8 +221,11 @@ The default `./data` directory is git-ignored. For large archives, point
 `--data-dir` at a dedicated local volume or mounted object-store cache.
 The local filesystem backend assumes local-disk locking semantics; do not point
 `--data-dir` at NFS or another shared network filesystem without an external
-lock. Symlinked data directories are accepted for local volume mounts; locking
-and durability apply to the resolved local filesystem target.
+lock. The runner rejects known network filesystems from Linux mount tables,
+macOS mount output, and Windows remote-drive detection when possible; if
+detection is unavailable, it prints a warning before continuing. Symlinked data
+directories are accepted for local volume mounts; locking and durability apply
+to the resolved local filesystem target.
 
 The preflight size check uses Databento's billable-size estimate as a
 conservative disk-space heuristic. Actual compressed DBN-on-disk size can differ

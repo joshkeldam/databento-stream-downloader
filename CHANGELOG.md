@@ -21,6 +21,8 @@ for repository tags even though it is intended to be cloned and run locally.
   single pass instead of warning and globbing in two separate scans.
 - Execute runs now warn before streaming when concurrent workers can have
   non-zero planned cost in flight before the secondary planning guard can react.
+- Network-filesystem preflight detection now covers macOS mount output and
+  Windows remote drives, and detection-unavailable cases emit a visible warning.
 
 ## [0.2.0] - 2026-04-26
 

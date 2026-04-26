@@ -63,6 +63,7 @@ from databento_stream_downloader.runner import (
     _fsync_directory,
     _money,
     _mount_for_path,
+    _parse_darwin_mount_line,
     _print_costs,
     _print_retry_summary,
     _raise_on_suspicious_all_no_data,
@@ -1783,10 +1784,14 @@ def test_reject_known_network_filesystem(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    def mount_entries(path: Path) -> list[tuple[Path, str]]:
+        _ = path
+        return [(tmp_path.resolve(strict=False), "nfs")]
+
     monkeypatch.setattr(
         runner_fsio,
-        "_linux_mount_entries",
-        lambda: [(tmp_path.resolve(strict=False), "nfs")],
+        "_mount_entries",
+        mount_entries,
     )
 
     with pytest.raises(FatalError, match="network filesystem"):
@@ -1800,13 +1805,61 @@ def test_mount_for_path_selects_nearest_mount(
     root = tmp_path.resolve(strict=False)
     child = root / "archive"
     child.mkdir()
+
+    def mount_entries(path: Path) -> list[tuple[Path, str]]:
+        _ = path
+        return [(root, "apfs"), (child, "nfs")]
+
     monkeypatch.setattr(
         runner_fsio,
-        "_linux_mount_entries",
-        lambda: [(root, "apfs"), (child, "nfs")],
+        "_mount_entries",
+        mount_entries,
     )
 
     assert _mount_for_path(child / "data") == (child, "nfs")
+
+
+def test_parse_darwin_mount_line() -> None:
+    line = "server:/share on /Volumes/Market Data (nfs, nodev, nosuid)"
+
+    assert _parse_darwin_mount_line(line) == (
+        Path("/Volumes/Market Data").resolve(strict=False),
+        "nfs",
+    )
+
+
+def test_mount_entries_routes_windows_drive_detection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_windows_mount_entry(path: Path) -> tuple[Path, str]:
+        _ = path
+        return (tmp_path, "remote")
+
+    monkeypatch.setattr(runner_fsio.os, "name", "nt")
+    monkeypatch.setattr(
+        runner_fsio,
+        "_windows_mount_entry",
+        fake_windows_mount_entry,
+    )
+
+    assert runner_fsio._mount_entries(tmp_path) == [(tmp_path, "remote")]
+
+
+def test_network_filesystem_detection_unavailable_warns_to_console(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def no_mount_entries(path: Path) -> list[tuple[Path, str]]:
+        _ = path
+        return []
+
+    monkeypatch.setattr(runner_fsio, "_mount_entries", no_mount_entries)
+    console = Console(record=True)
+
+    _reject_known_network_filesystem(tmp_path, console)
+
+    assert "network filesystem detection unavailable" in console.export_text()
 
 
 def test_suspicious_all_no_data_month_fails_loudly() -> None:

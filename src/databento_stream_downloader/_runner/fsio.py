@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -38,23 +39,27 @@ _NETWORK_FILESYSTEM_TYPES = frozenset(
         "lustre",
         "nfs",
         "nfs4",
+        "remote",
         "s3fs",
         "smb",
         "smbfs",
         "sshfs",
+        "webdav",
     }
 )
+_WINDOWS_DRIVE_REMOTE = 4
 LOGGER = structlog.get_logger(__name__)
 
 
 def _validate_runtime_config(
     config: DownloadConfig,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
+    console: Console | None = None,
 ) -> None:
     if config.data_dir.exists() and not config.data_dir.is_dir():
         msg = f"data_dir must be a directory, got file: {config.data_dir}"
         raise FatalConfigError(msg)
-    _reject_known_network_filesystem(config.data_dir)
+    _reject_known_network_filesystem(config.data_dir, console)
     config.data_dir.mkdir(parents=True, exist_ok=True)
     if os.name != "nt" and config.data_dir.stat().st_mode & 0o002:
         msg = f"data_dir must not be world-writable: {config.data_dir}"
@@ -151,15 +156,13 @@ def _unlock_file(file: TextIO) -> None:
     fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
-def _reject_known_network_filesystem(data_dir: Path) -> None:
+def _reject_known_network_filesystem(
+    data_dir: Path,
+    console: Console | None = None,
+) -> None:
     mount = _mount_for_path(data_dir)
     if mount is None:
-        if sys.platform != "linux":
-            LOGGER.warning(
-                "network_filesystem_detection_unavailable",
-                platform=sys.platform,
-                data_dir=str(data_dir),
-            )
+        _warn_network_filesystem_detection_unavailable(data_dir, console)
         return
     mount_point, fs_type = mount
     if fs_type.lower() not in _NETWORK_FILESYSTEM_TYPES:
@@ -172,7 +175,7 @@ def _reject_known_network_filesystem(data_dir: Path) -> None:
 
 
 def _mount_for_path(path: Path) -> tuple[Path, str] | None:
-    mounts = _linux_mount_entries()
+    mounts = _mount_entries(path)
     if not mounts:
         return None
     resolved = path.resolve(strict=False)
@@ -186,6 +189,15 @@ def _mount_for_path(path: Path) -> tuple[Path, str] | None:
     return max(candidates, key=lambda item: len(item[0].parts))
 
 
+def _mount_entries(path: Path) -> list[tuple[Path, str]]:
+    if os.name == "nt":
+        entry = _windows_mount_entry(path)
+        return [] if entry is None else [entry]
+    if sys.platform == "darwin":
+        return _darwin_mount_entries()
+    return _linux_mount_entries()
+
+
 def _linux_mount_entries() -> list[tuple[Path, str]]:
     mounts_path = Path("/proc/mounts")
     if not mounts_path.exists():
@@ -197,6 +209,77 @@ def _linux_mount_entries() -> list[tuple[Path, str]]:
             continue
         entries.append((Path(parts[1]).resolve(strict=False), parts[2]))
     return entries
+
+
+def _darwin_mount_entries() -> list[tuple[Path, str]]:
+    try:
+        completed = subprocess.run(
+            ["/sbin/mount"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if completed.returncode != 0:
+        return []
+    entries: list[tuple[Path, str]] = []
+    for line in completed.stdout.splitlines():
+        entry = _parse_darwin_mount_line(line)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _parse_darwin_mount_line(line: str) -> tuple[Path, str] | None:
+    marker = " on "
+    options_start = line.rfind(" (")
+    if marker not in line or options_start < 0:
+        return None
+    mount_start = line.find(marker) + len(marker)
+    mount_point = line[mount_start:options_start]
+    options = line[options_start + 2 :].removesuffix(")")
+    fs_type = options.split(",", maxsplit=1)[0].strip()
+    if not mount_point or not fs_type:
+        return None
+    return (Path(mount_point).resolve(strict=False), fs_type)
+
+
+def _windows_mount_entry(path: Path) -> tuple[Path, str] | None:
+    root_text = Path(path).resolve(strict=False).anchor
+    if not root_text:
+        return None
+    drive_type = _windows_drive_type(root_text)
+    if drive_type is None:
+        return None
+    fs_type = "remote" if drive_type == _WINDOWS_DRIVE_REMOTE else "local"
+    return (Path(root_text).resolve(strict=False), fs_type)
+
+
+def _windows_drive_type(root: str) -> int | None:
+    try:
+        kernel32 = __import__("ctypes").windll.kernel32
+    except AttributeError:
+        return None
+    return int(kernel32.GetDriveTypeW(root))
+
+
+def _warn_network_filesystem_detection_unavailable(
+    data_dir: Path,
+    console: Console | None = None,
+) -> None:
+    message = (
+        "network filesystem detection unavailable on this platform; verify "
+        f"{data_dir} is not NFS, SMB, sshfs, WebDAV, or another shared mount "
+        "unless you provide an external lock"
+    )
+    LOGGER.warning(
+        "network_filesystem_detection_unavailable",
+        platform=sys.platform,
+        data_dir=str(data_dir),
+    )
+    (console or Console(stderr=True)).print(f"[yellow]Warning:[/yellow] {message}")
 
 
 def _nearest_existing_parent(path: Path) -> Path:
@@ -329,12 +412,15 @@ __all__ = [
     "_NETWORK_FILESYSTEM_TYPES",
     "_TMP_GLOB",
     "_TMP_MIN_AGE_SECONDS",
+    "_darwin_mount_entries",
     "_exclusive_run_lock",
     "_fsync_and_sha256_file",
     "_fsync_directory",
     "_linux_mount_entries",
+    "_mount_entries",
     "_mount_for_path",
     "_nearest_existing_parent",
+    "_parse_darwin_mount_line",
     "_place_tmp",
     "_read_sha256_sidecar",
     "_record_directory_fsync_skipped",
@@ -346,5 +432,8 @@ __all__ = [
     "_unlock_file",
     "_validate_runtime_config",
     "_validate_sha256_sidecar",
+    "_warn_network_filesystem_detection_unavailable",
+    "_windows_drive_type",
+    "_windows_mount_entry",
     "_write_sha256_sidecar",
 ]
