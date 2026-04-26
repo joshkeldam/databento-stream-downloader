@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, NoReturn, cast
 
+import databento
 import pytest
 from databento.common.error import (
     BentoClientError,
@@ -230,6 +231,28 @@ def test_sdk_timeout_is_applied_to_metadata_and_timeseries_clients() -> None:
     assert client.metadata.TIMEOUT == 12.5
     assert client.timeseries.TIMEOUT == 12.5
     assert Api.TIMEOUT == 100.0
+
+
+def test_sdk_timeout_contract_matches_pinned_databento_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class Logger:
+        def warning(self, event: str, **kwargs: object) -> None:
+            events.append((event, kwargs))
+
+    monkeypatch.setattr(
+        "databento_stream_downloader.databento_client.LOGGER",
+        Logger(),
+    )
+    client = databento.Historical(key="test-key")
+
+    _apply_sdk_timeout(client, 12.5)
+
+    assert client.metadata.TIMEOUT == 12.5
+    assert client.timeseries.TIMEOUT == 12.5
+    assert not any(event == "sdk_timeout_not_applied" for event, _kwargs in events)
 
 
 @pytest.mark.parametrize(
