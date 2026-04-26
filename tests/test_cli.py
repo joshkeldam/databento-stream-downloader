@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import signal
 import sys
 from datetime import date
@@ -24,6 +25,12 @@ from databento_stream_downloader.errors import (
     ShutdownRequestedError,
 )
 from databento_stream_downloader.settings import EnvSettings
+
+
+def test_main_module_imports_without_invoking_cli() -> None:
+    module = importlib.import_module("databento_stream_downloader.__main__")
+
+    assert module.main is cli.main
 
 
 def _skip_dotenv(**_kwargs: object) -> bool:
