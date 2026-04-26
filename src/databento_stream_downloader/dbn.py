@@ -28,6 +28,9 @@ _CHUNK_SIZE = 1024 * 1024
 _MAX_METADATA_BYTES = 16 * 1024 * 1024
 _ZSTD_MAX_WINDOW_SIZE = 2**27
 _DEFAULT_MAX_DECOMPRESSED_BYTES = 32 * 1024 * 1024 * 1024
+_UNIX_EPOCH = date(1970, 1, 1)
+_NANOS_PER_DAY = 86_400 * 1_000_000_000
+_INT64_MAX_NANOS = 2**63 - 1
 # Strict validation treats instrument_id=0 as a system/sentinel record, not a
 # tradable instrument. Databento's public DBN docs describe instrument_id as the
 # numeric instrument mapping key, but do not currently document a permanent
@@ -352,6 +355,9 @@ def _mapped_instrument_ids(mappings: object) -> set[int]:
 
 def _date_to_nanos(value: date) -> int:
     """Convert a UTC date boundary to nanoseconds since the Unix epoch."""
-    if value < date(1970, 1, 1):
+    if value < _UNIX_EPOCH:
         raise ValueError(f"date must be >= 1970-01-01, got {value}")
-    return (value - date(1970, 1, 1)).days * 86_400 * 1_000_000_000
+    nanos = (value - _UNIX_EPOCH).days * _NANOS_PER_DAY
+    if nanos > _INT64_MAX_NANOS:
+        raise ValueError(f"date exceeds int64 nanosecond range: {value}")
+    return nanos

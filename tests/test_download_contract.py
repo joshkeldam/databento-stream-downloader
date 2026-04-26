@@ -206,6 +206,13 @@ def test_empty_dbn_file_round_trips_strict_validation(tmp_path: Path) -> None:
     validate_dbn_metadata(query, path, strict=True)
 
 
+def test_date_to_nanos_rejects_boundaries_outside_int64_range() -> None:
+    assert dbn._date_to_nanos(date(2262, 4, 11)) <= 2**63 - 1
+
+    with pytest.raises(ValueError, match="int64 nanosecond range"):
+        dbn._date_to_nanos(date(2262, 4, 12))
+
+
 def test_validator_passes_unknown_dbn_header_version_to_sdk_decode(
     tmp_path: Path,
 ) -> None:
