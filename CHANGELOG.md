@@ -9,7 +9,8 @@ for repository tags even though it is intended to be cloned and run locally.
 
 ### Added
 
-- Nothing yet.
+- Ledger v3 records now include `exit_code` and `interrupted` fields for
+  post-run outcome forensics.
 
 ## [0.2.0] - 2026-04-26
 

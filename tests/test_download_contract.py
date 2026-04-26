@@ -1215,8 +1215,10 @@ def test_run_download_writes_ledger_and_sha256_sidecar(tmp_path: Path) -> None:
     ledger = tmp_path / "download-ledger.jsonl"
     assert ledger.exists()
     record = json.loads(ledger.read_text(encoding="utf-8"))
-    assert record["ledger_schema_version"] == 2
+    assert record["ledger_schema_version"] == 3
     assert record["placed"] == 1
+    assert record["exit_code"] == 0
+    assert record["interrupted"] is False
     assert record["package_version"]
     assert record["retry_count_total"] == 0
     assert record["retry_count_by_operation"] == {}
@@ -1248,8 +1250,53 @@ def test_run_download_persists_directory_fsync_skipped_count(
 
     ledger = tmp_path / "download-ledger.jsonl"
     record = json.loads(ledger.read_text(encoding="utf-8"))
-    assert record["ledger_schema_version"] == 2
+    assert record["ledger_schema_version"] == 3
+    assert record["exit_code"] == 0
+    assert record["interrupted"] is False
     assert record["directory_fsync_skipped_count"] > 0
+
+
+def test_run_download_records_partial_failure_exit_code(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_download(config, RetryClient(), Console(record=True))
+
+    assert exc_info.value.code == 3
+    ledger = tmp_path / "download-ledger.jsonl"
+    record = json.loads(ledger.read_text(encoding="utf-8"))
+    assert record["ledger_schema_version"] == 3
+    assert record["failed"] == 1
+    assert record["exit_code"] == 3
+    assert record["interrupted"] is False
+
+
+def test_run_download_records_validation_failure_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path).model_copy(update={"validate_cached": True})
+
+    def fake_validate(
+        config: DownloadConfig,
+        console: Console,
+        work: list[WorkItem],
+    ) -> int:
+        _ = (config, console, work)
+        return 1
+
+    monkeypatch.setattr(runner, "_validate", fake_validate)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_download(config, FakeClient(), Console(record=True))
+
+    assert exc_info.value.code == 5
+    ledger = tmp_path / "download-ledger.jsonl"
+    record = json.loads(ledger.read_text(encoding="utf-8"))
+    assert record["ledger_schema_version"] == 3
+    assert record["validation_issues"] == 1
+    assert record["exit_code"] == 5
+    assert record["interrupted"] is False
 
 
 def test_validate_only_scrubs_cached_files_without_streaming(tmp_path: Path) -> None:

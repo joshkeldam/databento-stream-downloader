@@ -288,11 +288,14 @@ def _run_download_locked(
     if config.validate_cached:
         validation_issues = _validate(config, console, _cached_items(all_items, work))
     elapsed = time.monotonic() - started
+    exit_code = _run_exit_code(result, validation_issues)
     _write_run_ledger(
         config=config,
         run_id=run_id,
         result=result,
         validation_issues=validation_issues,
+        exit_code=exit_code,
+        interrupted=False,
         elapsed_seconds=elapsed,
         estimated_cost_cents=total_cents,
         estimated_billable_bytes=total_bytes,
@@ -323,10 +326,16 @@ def _run_download_locked(
         )
     if config.show_retries:
         _print_retry_summary(client, console)
+    if exit_code:
+        raise SystemExit(exit_code)
+
+
+def _run_exit_code(result: DownloadResult, validation_issues: int) -> int:
     if result.failed:
-        raise SystemExit(3)
+        return 3
     if validation_issues:
-        raise SystemExit(5)
+        return 5
+    return 0
 
 
 def _check_cost_cap(
@@ -1360,6 +1369,8 @@ def _write_run_ledger(
     run_id: str,
     result: DownloadResult,
     validation_issues: int,
+    exit_code: int,
+    interrupted: bool,
     elapsed_seconds: float,
     estimated_cost_cents: int,
     estimated_billable_bytes: int,
@@ -1376,7 +1387,7 @@ def _write_run_ledger(
         "\n".join(config.symbols).encode("utf-8"),
     ).hexdigest()
     payload = {
-        "ledger_schema_version": 2,
+        "ledger_schema_version": 3,
         "run_id": run_id,
         "dataset": DATASET,
         "package_version": package_version,
@@ -1397,6 +1408,8 @@ def _write_run_ledger(
         "no_data": result.no_data,
         "failed": result.failed,
         "validation_issues": validation_issues,
+        "exit_code": exit_code,
+        "interrupted": interrupted,
         "estimated_cost_cents": estimated_cost_cents,
         "estimated_cost_cents_landed": result.estimated_cost_cents_landed,
         "estimated_billable_bytes": estimated_billable_bytes,

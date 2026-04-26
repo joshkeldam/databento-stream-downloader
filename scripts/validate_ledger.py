@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate download-ledger.jsonl records against the v1 ledger contract."""
+"""Validate download-ledger.jsonl records against versioned ledger contracts."""
 
 from __future__ import annotations
 
