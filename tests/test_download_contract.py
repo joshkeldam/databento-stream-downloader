@@ -1458,7 +1458,10 @@ def test_repair_verifies_valid_sidecar_without_rewriting(
     assert issues == 0
 
 
-def test_repair_rejects_valid_but_mismatched_sidecar(tmp_path: Path) -> None:
+def test_repair_rejects_valid_but_mismatched_sidecar_without_rehashing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     config = _config(tmp_path)
     path = canonical_path(tmp_path, "ES.FUT", "mbo", date(2026, 4, 1))
     path.parent.mkdir(parents=True)
@@ -1477,6 +1480,19 @@ def test_repair_rejects_valid_but_mismatched_sidecar(tmp_path: Path) -> None:
         f"{stale_digest}  2026-04-01.dbn.zst\n",
         encoding="ascii",
     )
+    validate_calls = 0
+    original_validate = runner_validation._validate_sha256_sidecar
+
+    def count_validate_sidecar(path_arg: Path) -> None:
+        nonlocal validate_calls
+        validate_calls += 1
+        original_validate(path_arg)
+
+    monkeypatch.setattr(
+        runner_validation,
+        "_validate_sha256_sidecar",
+        count_validate_sidecar,
+    )
 
     issues = _repair_missing_sidecars(
         config,
@@ -1485,6 +1501,7 @@ def test_repair_rejects_valid_but_mismatched_sidecar(tmp_path: Path) -> None:
     )
 
     assert issues == 1
+    assert validate_calls == 1
     assert (
         _sha256_sidecar_path(path).read_text(encoding="ascii").startswith(stale_digest)
     )

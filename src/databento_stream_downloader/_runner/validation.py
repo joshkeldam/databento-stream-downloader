@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Literal
 
 import structlog
 from rich.console import Console
@@ -37,6 +39,13 @@ from databento_stream_downloader.paths import canonical_path
 from databento_stream_downloader.symbols import load_first_data_utc_dates
 
 LOGGER = structlog.get_logger(__name__)
+_SidecarStateKind = Literal["ok", "missing", "malformed", "mismatch"]
+
+
+@dataclass(frozen=True, slots=True)
+class _SidecarRepairState:
+    kind: _SidecarStateKind
+    error: str | None = None
 
 
 def _validate(
@@ -116,15 +125,19 @@ def _repair_missing_sidecars(
     *,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
 ) -> int:
-    needs_repair = [item for item in items if _sidecar_needs_repair(config, item)]
+    needs_repair: list[tuple[WorkItem, _SidecarRepairState]] = []
+    for item in items:
+        state = _sidecar_repair_state_for_item(config, item)
+        if state.kind != "ok":
+            needs_repair.append((item, state))
     if not needs_repair:
         return 0
     issues = 0
     workers = max(1, min(config.max_workers, len(needs_repair)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
-            pool.submit(_repair_one_sidecar, config, item, fsync_tracker)
-            for item in needs_repair
+            pool.submit(_repair_one_sidecar, config, item, fsync_tracker, state)
+            for item, state in needs_repair
         ]
         for future in as_completed(futures):
             item, error, repaired = future.result()
@@ -145,28 +158,23 @@ def _repair_missing_sidecars(
 
 
 def _sidecar_needs_repair(config: DownloadConfig, item: WorkItem) -> bool:
-    path = canonical_path(config.data_dir, item.symbol, item.schema, item.day)
-    if not path.exists():
-        return False
-    return _sidecar_repair_state(path) != "ok"
+    return _sidecar_repair_state_for_item(config, item).kind != "ok"
 
 
 def _repair_one_sidecar(
     config: DownloadConfig,
     item: WorkItem,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
+    sidecar_state: _SidecarRepairState | None = None,
 ) -> tuple[WorkItem, str | None, bool]:
     path = canonical_path(config.data_dir, item.symbol, item.schema, item.day)
     if not path.exists():
         return (item, None, False)
-    sidecar_state = _sidecar_repair_state(path)
-    if sidecar_state == "ok":
+    sidecar_state = sidecar_state or _sidecar_repair_state(path)
+    if sidecar_state.kind == "ok":
         return (item, None, False)
-    if sidecar_state == "mismatch":
-        try:
-            _validate_sha256_sidecar(path)
-        except ValidationError as exc:
-            return (item, str(exc), False)
+    if sidecar_state.kind == "mismatch":
+        return (item, sidecar_state.error or "SHA256 sidecar mismatch", False)
     query = StreamQuery(
         dataset=DATASET,
         symbol=item.symbol,
@@ -187,19 +195,29 @@ def _repair_one_sidecar(
     return (item, None, True)
 
 
-def _sidecar_repair_state(path: Path) -> str:
+def _sidecar_repair_state_for_item(
+    config: DownloadConfig,
+    item: WorkItem,
+) -> _SidecarRepairState:
+    path = canonical_path(config.data_dir, item.symbol, item.schema, item.day)
+    if not path.exists():
+        return _SidecarRepairState("ok")
+    return _sidecar_repair_state(path)
+
+
+def _sidecar_repair_state(path: Path) -> _SidecarRepairState:
     sidecar = _sha256_sidecar_path(path)
     if not sidecar.exists():
-        return "missing"
+        return _SidecarRepairState("missing")
     try:
         _ = _read_sha256_sidecar(path)
-    except ValidationError:
-        return "malformed"
+    except ValidationError as exc:
+        return _SidecarRepairState("malformed", str(exc))
     try:
         _validate_sha256_sidecar(path)
-    except ValidationError:
-        return "mismatch"
-    return "ok"
+    except ValidationError as exc:
+        return _SidecarRepairState("mismatch", str(exc))
+    return _SidecarRepairState("ok")
 
 
 def _raise_on_suspicious_all_no_data(
