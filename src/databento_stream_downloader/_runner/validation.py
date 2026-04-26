@@ -118,6 +118,58 @@ def _validate_one(
     return (item, None)
 
 
+def _validate_cached_metadata_preflight(
+    config: DownloadConfig,
+    items: Collection[WorkItem],
+    console: Console,
+) -> int:
+    if not items:
+        return 0
+    issues = 0
+    workers = max(1, min(config.max_workers, len(items)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_validate_cached_metadata_one, config, item) for item in items
+        ]
+        for future in as_completed(futures):
+            item, error = future.result()
+            if error is None:
+                continue
+            issues += 1
+            console.print(
+                f"  [red]✗[/red] {item.symbol}/{item.schema} "
+                f"{item.day}: invalid cached DBN: {error}"
+            )
+    return issues
+
+
+def _validate_cached_metadata_one(
+    config: DownloadConfig,
+    item: WorkItem,
+) -> tuple[WorkItem, str | None]:
+    path = canonical_path(config.data_dir, item.symbol, item.schema, item.day)
+    query = StreamQuery(
+        dataset=DATASET,
+        symbol=item.symbol,
+        schema=item.schema,
+        start=item.day,
+        end=item.day + timedelta(days=1),
+    )
+    try:
+        validate_dbn_metadata(query, path, deep=False, strict=False)
+    except ValidationError as exc:
+        LOGGER.warning(
+            "cached_metadata_preflight_failed",
+            symbol=item.symbol,
+            schema=item.schema,
+            day=item.day.isoformat(),
+            path=str(path),
+            error=str(exc),
+        )
+        return (item, str(exc))
+    return (item, None)
+
+
 def _repair_missing_sidecars(
     config: DownloadConfig,
     items: Collection[WorkItem],
@@ -266,5 +318,7 @@ __all__ = [
     "_sidecar_needs_repair",
     "_sidecar_repair_state",
     "_validate",
+    "_validate_cached_metadata_one",
+    "_validate_cached_metadata_preflight",
     "_validate_one",
 ]

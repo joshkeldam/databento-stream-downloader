@@ -88,6 +88,8 @@ from databento_stream_downloader._runner.validation import (
     _sidecar_needs_repair,
     _sidecar_repair_state,
     _validate,
+    _validate_cached_metadata_one,
+    _validate_cached_metadata_preflight,
     _validate_one,
 )
 from databento_stream_downloader._runner.work import (
@@ -176,6 +178,8 @@ __all__ = [
     "_unlock_file",
     "_utc_now",
     "_validate",
+    "_validate_cached_metadata_one",
+    "_validate_cached_metadata_preflight",
     "_validate_one",
     "_validate_runtime_config",
     "_validate_sha256_sidecar",

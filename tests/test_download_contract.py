@@ -1113,6 +1113,21 @@ def test_run_download_skips_cached_validation_by_default(tmp_path: Path) -> None
     assert exc_info.value.code == 5
 
 
+def test_run_download_rejects_cached_garbage_even_with_matching_sidecar(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    path = canonical_path(tmp_path, "ES.FUT", "mbo", date(2026, 4, 1))
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"not dbn")
+    runner._write_sha256_sidecar(path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_download(config, FakeClient(), Console(record=True))
+
+    assert exc_info.value.code == 5
+
+
 def test_run_download_can_validate_cached_files(tmp_path: Path) -> None:
     config = _config(tmp_path).model_copy(update={"validate_cached": True})
     path = canonical_path(tmp_path, "ES.FUT", "mbo", date(2026, 4, 1))

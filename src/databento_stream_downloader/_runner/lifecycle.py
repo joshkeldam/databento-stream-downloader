@@ -40,6 +40,7 @@ from databento_stream_downloader._runner.types import (
 from databento_stream_downloader._runner.validation import (
     _repair_missing_sidecars,
     _validate,
+    _validate_cached_metadata_preflight,
 )
 from databento_stream_downloader._runner.work import (
     _all_items,
@@ -143,6 +144,13 @@ def _run_download_locked(
     _sweep_stale_tmp_files(config)
     all_items = _all_items(config)
     existing_items = _existing_items(config)
+    metadata_issues = _validate_cached_metadata_preflight(
+        config,
+        existing_items,
+        error_console,
+    )
+    if metadata_issues:
+        raise SystemExit(5)
     repair_issues = _repair_missing_sidecars(
         config,
         existing_items,
