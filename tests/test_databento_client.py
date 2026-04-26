@@ -23,8 +23,8 @@ from databento.common.error import (
 from databento_stream_downloader.databento_client import (
     DatabentoClient,
     _apply_sdk_timeout,
+    _call_with_sdk_warning_scope,
     _float_to_decimal_dollars,
-    _install_warning_filters,
     _is_semantic_no_data_422,
     _raise_classified,
     _retry_after_seconds,
@@ -41,17 +41,24 @@ def _client(*, sleeps: list[float]) -> DatabentoClient:
     )
 
 
-def test_no_data_bento_warning_is_suppressed() -> None:
-    _install_warning_filters()
-
+def test_no_data_bento_warning_is_suppressed_only_in_sdk_warning_scope() -> None:
     with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _call_with_sdk_warning_scope(
+            lambda: warnings.warn(
+                "No data found for the request you submitted.",
+                BentoWarning,
+                stacklevel=1,
+            )
+        )
         warnings.warn(
             "No data found for the request you submitted.",
             BentoWarning,
             stacklevel=1,
         )
 
-    assert caught == []
+    assert len(caught) == 1
+    assert caught[0].category is BentoWarning
 
 
 def test_cost_estimate_conversion_rounds_half_up() -> None:

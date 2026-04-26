@@ -69,8 +69,7 @@ _INVALID_422_MARKERS = (
     "stype",
     "dataset",
 )
-_WARNING_FILTER_LOCK = threading.Lock()
-_warning_filter_installed = False
+_SDK_WARNING_LOCK = threading.Lock()
 
 
 class DatabentoClient:
@@ -92,19 +91,20 @@ class DatabentoClient:
         self._retry_count = 0
         self._retry_counts_by_operation: dict[str, int] = {}
         self._retry_lock = threading.Lock()
-        _install_warning_filters()
 
     def estimate_cost(self, query: CostQuery) -> Decimal:
         client = self._client()
         try:
             cost = self._with_retry(
-                lambda: client.metadata.get_cost(
-                    dataset=query.dataset,
-                    symbols=query.symbol,
-                    stype_in="parent",
-                    schema=query.schema,
-                    start=query.start.isoformat(),
-                    end=query.end.isoformat(),
+                lambda: _call_with_sdk_warning_scope(
+                    lambda: client.metadata.get_cost(
+                        dataset=query.dataset,
+                        symbols=query.symbol,
+                        stype_in="parent",
+                        schema=query.schema,
+                        start=query.start.isoformat(),
+                        end=query.end.isoformat(),
+                    )
                 ),
                 operation="estimate_cost",
             )
@@ -118,13 +118,15 @@ class DatabentoClient:
         client = self._client()
         try:
             return self._with_retry(
-                lambda: client.metadata.get_billable_size(
-                    dataset=query.dataset,
-                    symbols=query.symbol,
-                    stype_in="parent",
-                    schema=query.schema,
-                    start=query.start.isoformat(),
-                    end=query.end.isoformat(),
+                lambda: _call_with_sdk_warning_scope(
+                    lambda: client.metadata.get_billable_size(
+                        dataset=query.dataset,
+                        symbols=query.symbol,
+                        stype_in="parent",
+                        schema=query.schema,
+                        start=query.start.isoformat(),
+                        end=query.end.isoformat(),
+                    )
                 ),
                 operation="estimate_size",
             )
@@ -138,14 +140,16 @@ class DatabentoClient:
 
         def _stream() -> object:
             output_path.unlink(missing_ok=True)
-            return client.timeseries.get_range(
-                dataset=query.dataset,
-                symbols=query.symbol,
-                stype_in="parent",
-                schema=query.schema,
-                start=query.start.isoformat(),
-                end=query.end.isoformat(),
-                path=str(output_path),
+            return _call_with_sdk_warning_scope(
+                lambda: client.timeseries.get_range(
+                    dataset=query.dataset,
+                    symbols=query.symbol,
+                    stype_in="parent",
+                    schema=query.schema,
+                    start=query.start.isoformat(),
+                    end=query.end.isoformat(),
+                    path=str(output_path),
+                )
             )
 
         try:
@@ -377,17 +381,14 @@ def _is_retryable_bento_error(exc: BentoError) -> bool:
     )
 
 
-def _install_warning_filters() -> None:
-    global _warning_filter_installed
-    with _WARNING_FILTER_LOCK:
-        if _warning_filter_installed:
-            return
+def _call_with_sdk_warning_scope[T](fn: Callable[[], T]) -> T:
+    with _SDK_WARNING_LOCK, warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
             message=r".*No data found.*",
             category=BentoWarning,
         )
-        _warning_filter_installed = True
+        return fn()
 
 
 def _raise_classified(exc: BentoClientError | BentoServerError) -> Never:
