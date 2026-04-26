@@ -1185,6 +1185,11 @@ def test_money_rejects_negative_cents() -> None:
         _money(-1)
 
 
+def test_bytes_rejects_negative_size() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        _bytes(-1)
+
+
 def test_bytes_formats_tib() -> None:
     assert _bytes(2 * 1_099_511_627_776) == "2.00 TiB"
 

@@ -47,6 +47,9 @@ def _money(cents: int) -> str:
 
 
 def _bytes(size: int) -> str:
+    if size < 0:
+        msg = f"size must be non-negative, got {size}"
+        raise ValueError(msg)
     if size >= 1_099_511_627_776:
         return f"{size / 1_099_511_627_776:.2f} TiB"
     if size >= 1_073_741_824:
