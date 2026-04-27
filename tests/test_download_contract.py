@@ -2122,18 +2122,26 @@ def test_stream_missing_accepts_generator_with_per_key_estimates(
         expected_weekdays_by_key={key: len(items)},
     )
 
-    assert result.placed == 2
+    assert result.placed == len(items)
     assert result.estimated_billable_bytes_landed == 3
     assert result.estimated_cost_cents_landed == 3
 
 
-def test_stream_missing_serializes_large_estimated_streams(tmp_path: Path) -> None:
+def test_stream_missing_throttles_large_estimated_streams(tmp_path: Path) -> None:
     config = _config(tmp_path).model_copy(
-        update={"end": date(2026, 4, 2), "max_workers": 2}
+        update={
+            "end": date(2026, 4, 10),
+            "max_workers": runner_stream._MAX_LARGE_STREAMS + 4,
+            "allow_high_mbo_workers": True,
+        }
     )
     items = [
-        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
-        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 2)),
+        WorkItem(
+            symbol="ES.FUT",
+            schema="mbo",
+            day=date(2026, 4, 1) + timedelta(days=index),
+        )
+        for index in range(runner_stream._MAX_LARGE_STREAMS + 2)
     ]
 
     class ConcurrentLargeClient(FakeClient):
@@ -2170,8 +2178,8 @@ def test_stream_missing_serializes_large_estimated_streams(tmp_path: Path) -> No
         ),
     )
 
-    assert result.placed == 2
-    assert client.max_active_streams == 1
+    assert result.placed == len(items)
+    assert 1 < client.max_active_streams <= runner_stream._MAX_LARGE_STREAMS
 
 
 def test_stream_missing_enforces_in_flight_planning_guard_across_partitions(
