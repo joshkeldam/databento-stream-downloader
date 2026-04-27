@@ -32,10 +32,6 @@ import databento_stream_downloader._runner.validation as runner_validation
 import databento_stream_downloader._runner.work as runner_work
 import databento_stream_downloader.dbn as dbn
 import databento_stream_downloader.runner as runner
-from databento_stream_downloader.archive_manifest import (
-    archive_manifest_path,
-    record_manifest_event,
-)
 from databento_stream_downloader.config import DownloadConfig, RunMode
 from databento_stream_downloader.dbn import validate_dbn_metadata, write_empty_dbn_file
 from databento_stream_downloader.errors import (
@@ -1652,33 +1648,6 @@ def test_run_download_writes_ledger_and_sha256_sidecar(tmp_path: Path) -> None:
         assert record["directory_fsync_skipped_count"] > 0
     else:
         assert record["directory_fsync_skipped_count"] == 0
-
-
-def test_run_download_records_archive_manifest(tmp_path: Path) -> None:
-    _run_download(_config(tmp_path), FakeClient(), Console(record=True))
-
-    records = [
-        json.loads(line)
-        for line in archive_manifest_path(tmp_path)
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ]
-    assert records[-1]["event"] == "databento_downloaded"
-    assert records[-1]["relkey"] == "raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst"
-    assert records[-1]["size_bytes"] > 0
-
-
-def test_manifested_partition_without_file_does_not_skip_databento_download(
-    tmp_path: Path,
-) -> None:
-    item = WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))
-    record_manifest_event(tmp_path, "s3_synced", item, size_bytes=123)
-    client = FakeClient()
-
-    _run_download(_config(tmp_path), client, Console(record=True))
-
-    assert len(client.cost_queries) == 1
-    assert len(client.streamed) == 1
 
 
 def test_run_download_persists_directory_fsync_skipped_count(

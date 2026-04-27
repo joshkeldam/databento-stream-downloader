@@ -14,7 +14,6 @@ from databento_stream_downloader._sync.format import _print_sync_plan
 from databento_stream_downloader._sync.inventory import (
     compute_plan,
     list_remote,
-    s3_key_for,
     walk_local,
 )
 from databento_stream_downloader._sync.stream import _sync_run
@@ -23,12 +22,7 @@ from databento_stream_downloader._sync.types import (
     SyncConfig,
     SyncDirection,
 )
-from databento_stream_downloader.archive_manifest import (
-    ARCHIVE_MANIFEST_FILE,
-    archive_manifest_path,
-)
 from databento_stream_downloader.config import RunMode
-from databento_stream_downloader.errors import FatalError, RetryableError
 from databento_stream_downloader.s3_client import S3Client
 
 if TYPE_CHECKING:
@@ -135,8 +129,6 @@ def run_sync(
             plan,
             error_console=error_console,
         )
-        if config.direction is SyncDirection.PUSH:
-            failed += _push_manifest_to_s3(config, client, error_console)
         direction_word = (
             "Pushed" if config.direction is SyncDirection.PUSH else "Pulled"
         )
@@ -165,29 +157,4 @@ def _effective_planning_mode(config: SyncConfig) -> PlanningMode:
     return config.planning_mode
 
 
-def _push_manifest_to_s3(
-    config: SyncConfig,
-    client: S3Client,
-    error_console: Console,
-) -> int:
-    manifest = archive_manifest_path(config.data_dir)
-    if not manifest.is_file():
-        return 0
-    key = s3_key_for(ARCHIVE_MANIFEST_FILE, config.prefix)
-    try:
-        client.upload_file(
-            manifest,
-            key,
-            extra_args={"ContentType": "application/x-jsonlines"},
-        )
-    except (FatalError, RetryableError, OSError) as exc:
-        error_console.print(
-            "  [red]✗[/red] archive manifest upload failed: "
-            f"{type(exc).__name__}: {exc}"
-        )
-        return 1
-    LOGGER.info("archive_manifest_synced_to_s3", key=key)
-    return 0
-
-
-__all__ = ["_effective_planning_mode", "_push_manifest_to_s3", "run_sync"]
+__all__ = ["_effective_planning_mode", "run_sync"]

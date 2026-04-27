@@ -14,7 +14,6 @@ from databento_stream_downloader._sync.types import (
     SyncItem,
     SyncOutcome,
 )
-from databento_stream_downloader.archive_manifest import record_manifest_path_event
 from databento_stream_downloader.errors import (
     FatalError,
     RetryableError,
@@ -46,9 +45,6 @@ def upload_one(
     client: S3Client,
     item: SyncItem,
     in_flight: _InFlightRegistry[SyncItem] | None,
-    *,
-    data_dir: Path | None = None,
-    bucket: str | None = None,
 ) -> tuple[SyncOutcome, str, int]:
     """Upload a single item. Returns (outcome, label, bytes_moved)."""
     label = item.s3_key
@@ -60,15 +56,6 @@ def upload_one(
             extra["Metadata"] = {"sha256": item.sha256}
         try:
             client.upload_file(local_path, item.s3_key, extra_args=extra)
-            if data_dir is not None:
-                record_manifest_path_event(
-                    data_dir,
-                    "s3_synced",
-                    local_path,
-                    sha256=item.sha256,
-                    s3_bucket=bucket,
-                    s3_key=item.s3_key,
-                )
         except FatalError:
             raise
         except RetryableError as exc:
@@ -88,8 +75,6 @@ def download_one(
     *,
     verify_sha256: bool,
     fsync_writes: bool,
-    data_dir: Path | None = None,
-    bucket: str | None = None,
 ) -> tuple[SyncOutcome, str, int]:
     """Download one item then atomic-replace. Returns (outcome, label, bytes)."""
     label = item.s3_key
@@ -128,15 +113,6 @@ def download_one(
         os.replace(tmp, dest)
         if fsync_writes:
             _fsync_directory(dest.parent)
-        if data_dir is not None:
-            record_manifest_path_event(
-                data_dir,
-                "s3_pulled",
-                dest,
-                sha256=item.sha256,
-                s3_bucket=bucket,
-                s3_key=item.s3_key,
-            )
     finally:
         if in_flight is not None and token is not None:
             in_flight.remove(token)

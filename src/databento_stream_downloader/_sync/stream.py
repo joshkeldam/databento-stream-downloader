@@ -153,8 +153,6 @@ def _sync_run(
                 client,
                 item,
                 in_flight,
-                data_dir=config.data_dir,
-                bucket=config.bucket,
             )
         return pool.submit(
             download_one,
@@ -163,8 +161,6 @@ def _sync_run(
             in_flight,
             verify_sha256=config.verify_sha256,
             fsync_writes=config.fsync_writes,
-            data_dir=config.data_dir,
-            bucket=config.bucket,
         )
 
     def _submit_delete(

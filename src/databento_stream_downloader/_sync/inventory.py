@@ -25,6 +25,7 @@ LOGGER = structlog.get_logger(__name__)
 # Files we never sync — transient run state and OS noise.
 _SKIP_PATTERNS = (
     re.compile(r"^\.run\.lock$"),
+    re.compile(r"^archive-manifest\.jsonl$"),
     re.compile(r"^\.[^/]*\.tmp$"),
     re.compile(r"^\.[^/]*\.tmp\..*$"),
     re.compile(r"^\.DS_Store$"),

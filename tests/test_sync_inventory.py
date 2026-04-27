@@ -28,6 +28,7 @@ def test_should_skip_excludes_transient_and_lock_files() -> None:
     assert _should_skip(".foo.tmp.partial") is True
     assert _should_skip(".DS_Store") is True
     assert _should_skip(".write_test.abc") is True
+    assert _should_skip("archive-manifest.jsonl") is True
     assert _should_skip("download-ledger.jsonl") is False
     assert _should_skip("2026-04-01.dbn.zst") is False
     assert _should_skip("2026-04-01.dbn.zst.sha256") is False
@@ -48,6 +49,10 @@ def test_walk_local_skips_transients_and_collects_sidecars(tmp_path: Path) -> No
         '{"x": 1}\n',
         encoding="utf-8",
     )
+    (tmp_path / "data" / "archive-manifest.jsonl").write_text(
+        '{"x": 1}\n',
+        encoding="utf-8",
+    )
 
     entries = walk_local(tmp_path / "data")
 
@@ -55,6 +60,7 @@ def test_walk_local_skips_transients_and_collects_sidecars(tmp_path: Path) -> No
     assert "raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst" in keys
     assert "raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst.sha256" in keys
     assert "download-ledger.jsonl" in keys
+    assert "archive-manifest.jsonl" not in keys
     assert all("tmp" not in key for key in keys)
     assert all("run.lock" not in key for key in keys)
 

@@ -251,11 +251,8 @@ validation uses the larger of 64 MiB or twice Databento's billable-size estimate
 for the partition. Use `--strict-validate` for record-level structural checks.
 Existing canonical files are treated as cached after sidecar preflight; use
 `--validate-cached` to verify cached file hashes and DBN metadata during a run.
-The downloader also maintains `data/archive-manifest.jsonl`, an append-only
-audit log updated after Databento placements and successful S3 push/pull
-transfers. Cache discovery is filesystem-authoritative: only canonical files
-present under `data/raw/...` are treated as cached. A manifest record alone never
-suppresses a Databento request.
+Cache discovery is filesystem-authoritative: only canonical files present under
+`data/raw/...` are treated as cached.
 
 Use `--validate-only` to scrub cached files in the requested scope without a
 Databento API key, cost estimate, or download request. This is the intended

@@ -42,7 +42,6 @@ from databento_stream_downloader._runner.validation import (
     _raise_on_suspicious_all_no_data,
 )
 from databento_stream_downloader._runner.work import _total_partitions
-from databento_stream_downloader.archive_manifest import record_manifest_event
 from databento_stream_downloader.config import MBO_MAX_WORKERS, DownloadConfig
 from databento_stream_downloader.constants import DATASET
 from databento_stream_downloader.dbn import validate_dbn_metadata
@@ -614,13 +613,6 @@ def _stream_one(
                     fsync_tracker,
                     fsync_writes=config.fsync_writes,
                 )
-            record_manifest_event(
-                config.data_dir,
-                "databento_downloaded",
-                item,
-                size_bytes=dest.stat().st_size,
-                sha256=digest,
-            )
             return ("placed", label)
         except DegradedError:
             try:
@@ -649,13 +641,6 @@ def _stream_one(
                         fsync_tracker,
                         fsync_writes=config.fsync_writes,
                     )
-                record_manifest_event(
-                    config.data_dir,
-                    "databento_no_data",
-                    item,
-                    size_bytes=dest.stat().st_size,
-                    sha256=digest,
-                )
                 return ("no_data", label)
             except ValidationError as exc:
                 tmp.unlink(missing_ok=True)
