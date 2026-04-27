@@ -1490,6 +1490,33 @@ def test_download_progress_label_reads_active_tmp_bytes(tmp_path: Path) -> None:
     assert runner_stream._download_progress_label(active) == "1.5 KiB downloaded"
 
 
+def test_download_progress_label_shows_transfer_speed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    timestamps = iter([10.0, 12.0])
+    monkeypatch.setattr(runner_stream, "_progress_time", lambda: next(timestamps))
+    tmp = tmp_path / ".2026-04-01.dbn.tmp"
+    tmp.write_bytes(b"x" * 1024)
+    active = runner_stream._ActiveDownload(
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
+        tmp,
+        None,
+    )
+    state = runner_stream._LiveProgressState()
+
+    assert (
+        runner_stream._download_progress_label(active, state)
+        == "1.0 KiB downloaded; measuring speed"
+    )
+    tmp.write_bytes(b"x" * 3072)
+
+    assert (
+        runner_stream._download_progress_label(active, state)
+        == "3.0 KiB downloaded; 1.0 KiB/s"
+    )
+
+
 def test_progress_panel_lists_every_active_download(tmp_path: Path) -> None:
     console = Console(record=True, width=160)
     progress = runner_stream._build_progress(False, console)
@@ -1509,7 +1536,7 @@ def test_progress_panel_lists_every_active_download(tmp_path: Path) -> None:
         tracker,
         runner_stream._OutcomeCounts(),
         max_workers=10,
-        active_workers=10,
+        state=runner_stream._LiveProgressState(active_workers=10),
     )
     console.print(panel)
     output = console.export_text()

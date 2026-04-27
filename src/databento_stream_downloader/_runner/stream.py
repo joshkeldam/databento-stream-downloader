@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Sized
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -102,6 +103,7 @@ class _OutcomeCounts:
 @dataclass(slots=True)
 class _LiveProgressState:
     active_workers: int = 0
+    download_samples: dict[Path, tuple[float, int]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
 
     def set_active_workers(self, active_workers: int) -> None:
@@ -111,6 +113,25 @@ class _LiveProgressState:
     def snapshot_active_workers(self) -> int:
         with self._lock:
             return self.active_workers
+
+    def speed_for(self, path: Path, downloaded_bytes: int) -> int | None:
+        now = _progress_time()
+        with self._lock:
+            previous = self.download_samples.get(path)
+            self.download_samples[path] = (now, downloaded_bytes)
+        if previous is None:
+            return None
+        previous_time, previous_bytes = previous
+        elapsed = now - previous_time
+        if elapsed <= 0:
+            return None
+        return max(0, int((downloaded_bytes - previous_bytes) / elapsed))
+
+    def prune_downloads(self, paths: set[Path]) -> None:
+        with self._lock:
+            stale_paths = set(self.download_samples) - paths
+            for path in stale_paths:
+                self.download_samples.pop(path, None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +148,7 @@ class _ProgressPanelRenderable:
             self.tracker,
             self.counts,
             self.max_workers,
-            self.state.snapshot_active_workers(),
+            self.state,
         )
 
 
@@ -136,10 +157,11 @@ def _render_progress_panel(
     tracker: _InFlightRegistry[_ActiveDownload],
     counts: _OutcomeCounts,
     max_workers: int,
-    active_workers: int,
+    state: _LiveProgressState,
 ) -> Panel:
     placed, no_data, failed = counts.snapshot()
     in_flight = tracker.snapshot()
+    state.prune_downloads({active.tmp_path for active in in_flight})
 
     activity = Table.grid(padding=(0, 1))
     activity.add_column(no_wrap=True)
@@ -154,7 +176,7 @@ def _render_progress_panel(
                     (item.day.isoformat(), "white"),
                     "  ",
                     (
-                        _download_progress_label(active),
+                        _download_progress_label(active, state),
                         "magenta",
                     ),
                 ),
@@ -172,7 +194,7 @@ def _render_progress_panel(
     )
     workers_line = Text.assemble(
         ("Workers ", "dim"),
-        (f"{active_workers}", "bold"),
+        (f"{state.snapshot_active_workers()}", "bold"),
         (f" / {max_workers} active", "dim"),
     )
 
@@ -184,9 +206,17 @@ def _render_progress_panel(
     )
 
 
-def _download_progress_label(active: _ActiveDownload) -> str:
+def _download_progress_label(
+    active: _ActiveDownload,
+    state: _LiveProgressState | None = None,
+) -> str:
     downloaded_bytes = _stat_downloaded_bytes(active.tmp_path)
-    return f"{_bytes(downloaded_bytes)} downloaded"
+    if state is None:
+        return f"{_bytes(downloaded_bytes)} downloaded"
+    bytes_per_second = state.speed_for(active.tmp_path, downloaded_bytes)
+    if bytes_per_second is None:
+        return f"{_bytes(downloaded_bytes)} downloaded; measuring speed"
+    return f"{_bytes(downloaded_bytes)} downloaded; {_bytes(bytes_per_second)}/s"
 
 
 def _stat_downloaded_bytes(path: Path) -> int:
@@ -194,6 +224,10 @@ def _stat_downloaded_bytes(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _progress_time() -> float:
+    return time.monotonic()
 
 
 def _build_progress(quiet: bool, console: Console) -> Progress:
