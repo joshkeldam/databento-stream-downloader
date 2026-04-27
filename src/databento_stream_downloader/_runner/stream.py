@@ -61,6 +61,7 @@ from databento_stream_downloader.paths import canonical_path
 LOGGER = structlog.get_logger(__name__)
 _LARGE_STREAM_BYTES = 512 * 1024 * 1024
 _MAX_LARGE_STREAMS = 2
+_SPEED_WINDOW_SECONDS = 20.0
 _StreamResult = tuple[DownloadOutcome, str]
 WorkKey = tuple[str, str]
 
@@ -103,7 +104,7 @@ class _OutcomeCounts:
 @dataclass(slots=True)
 class _LiveProgressState:
     active_workers: int = 0
-    download_samples: dict[Path, tuple[float, int]] = field(default_factory=dict)
+    download_samples: dict[Path, list[tuple[float, int]]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
 
     def set_active_workers(self, active_workers: int) -> None:
@@ -117,11 +118,14 @@ class _LiveProgressState:
     def speed_for(self, path: Path, downloaded_bytes: int) -> int | None:
         now = _progress_time()
         with self._lock:
-            previous = self.download_samples.get(path)
-            self.download_samples[path] = (now, downloaded_bytes)
-        if previous is None:
-            return None
-        previous_time, previous_bytes = previous
+            samples = self.download_samples.setdefault(path, [])
+            samples.append((now, downloaded_bytes))
+            cutoff = now - _SPEED_WINDOW_SECONDS
+            while len(samples) > 2 and samples[1][0] < cutoff:
+                samples.pop(0)
+            if len(samples) < 2:
+                return None
+            previous_time, previous_bytes = samples[0]
         elapsed = now - previous_time
         if elapsed <= 0:
             return None
@@ -216,7 +220,7 @@ def _download_progress_label(
     bytes_per_second = state.speed_for(active.tmp_path, downloaded_bytes)
     if bytes_per_second is None:
         return f"{_bytes(downloaded_bytes)} downloaded; measuring speed"
-    return f"{_bytes(downloaded_bytes)} downloaded; {_bytes(bytes_per_second)}/s"
+    return f"{_bytes(downloaded_bytes)} downloaded; {_bytes(bytes_per_second)}/s avg"
 
 
 def _stat_downloaded_bytes(path: Path) -> int:

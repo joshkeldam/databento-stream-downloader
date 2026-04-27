@@ -1494,7 +1494,7 @@ def test_download_progress_label_shows_transfer_speed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    timestamps = iter([10.0, 12.0])
+    timestamps = iter([10.0, 12.0, 14.0])
     monkeypatch.setattr(runner_stream, "_progress_time", lambda: next(timestamps))
     tmp = tmp_path / ".2026-04-01.dbn.tmp"
     tmp.write_bytes(b"x" * 1024)
@@ -1513,7 +1513,12 @@ def test_download_progress_label_shows_transfer_speed(
 
     assert (
         runner_stream._download_progress_label(active, state)
-        == "3.0 KiB downloaded; 1.0 KiB/s"
+        == "3.0 KiB downloaded; 1.0 KiB/s avg"
+    )
+
+    assert (
+        runner_stream._download_progress_label(active, state)
+        == "3.0 KiB downloaded; 512 B/s avg"
     )
 
 
