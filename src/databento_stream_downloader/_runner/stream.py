@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sized
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
 from threading import Lock
 
 import structlog
@@ -29,7 +30,7 @@ from databento_stream_downloader._runner.concurrency import (
     _cancel_futures,
     _InFlightRegistry,
 )
-from databento_stream_downloader._runner.format import _money
+from databento_stream_downloader._runner.format import _bytes, _money
 from databento_stream_downloader._runner.fsio import _place_tmp, _write_sha256_sidecar
 from databento_stream_downloader._runner.types import (
     DownloaderClient,
@@ -58,7 +59,6 @@ from databento_stream_downloader.models import DownloadResult, StreamQuery
 from databento_stream_downloader.paths import canonical_path
 
 LOGGER = structlog.get_logger(__name__)
-_IN_FLIGHT_DISPLAY_LIMIT = 8
 _LARGE_STREAM_BYTES = 512 * 1024 * 1024
 _MAX_LARGE_STREAMS = 1
 _StreamResult = tuple[DownloadOutcome, str]
@@ -70,6 +70,13 @@ class _PendingWork:
     item: WorkItem
     estimated_bytes: int | None
     estimated_cost_cents: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveDownload:
+    item: WorkItem
+    tmp_path: Path
+    estimated_bytes: int | None
 
 
 @dataclass(slots=True)
@@ -110,7 +117,7 @@ class _LiveProgressState:
 @dataclass(frozen=True, slots=True)
 class _ProgressPanelRenderable:
     progress: Progress
-    tracker: _InFlightRegistry[WorkItem]
+    tracker: _InFlightRegistry[_ActiveDownload]
     counts: _OutcomeCounts
     max_workers: int
     state: _LiveProgressState
@@ -127,30 +134,32 @@ class _ProgressPanelRenderable:
 
 def _render_progress_panel(
     progress: Progress,
-    tracker: _InFlightRegistry[WorkItem],
+    tracker: _InFlightRegistry[_ActiveDownload],
     counts: _OutcomeCounts,
     max_workers: int,
     active_workers: int,
 ) -> Panel:
     placed, no_data, failed = counts.snapshot()
     in_flight = tracker.snapshot()
-    in_flight_count = len(in_flight)
 
     activity = Table.grid(padding=(0, 1))
     activity.add_column(no_wrap=True)
     if in_flight:
-        for item in in_flight[:_IN_FLIGHT_DISPLAY_LIMIT]:
+        for active in in_flight:
+            item = active.item
             activity.add_row(
                 Text.assemble(
                     ("▸ ", "dim"),
                     (f"{item.symbol}/{item.schema}", "cyan"),
                     "  ",
                     (item.day.isoformat(), "white"),
+                    "  ",
+                    (
+                        _download_progress_label(active),
+                        "magenta",
+                    ),
                 ),
             )
-        remaining = in_flight_count - _IN_FLIGHT_DISPLAY_LIMIT
-        if remaining > 0:
-            activity.add_row(Text(f"… and {remaining} more", style="dim italic"))
     else:
         activity.add_row(Text("(idle)", style="dim italic"))
 
@@ -174,6 +183,22 @@ def _render_progress_panel(
         border_style="cyan",
         padding=(1, 2),
     )
+
+
+def _download_progress_label(active: _ActiveDownload) -> str:
+    downloaded_bytes = _stat_downloaded_bytes(active.tmp_path)
+    estimated_bytes = active.estimated_bytes
+    if estimated_bytes is None or estimated_bytes <= 0:
+        return f"{_bytes(downloaded_bytes)} downloaded"
+    percent = downloaded_bytes / estimated_bytes * 100
+    return f"{_bytes(downloaded_bytes)} / {_bytes(estimated_bytes)} ({percent:.1f}%)"
+
+
+def _stat_downloaded_bytes(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def _build_progress(quiet: bool, console: Console) -> Progress:
@@ -234,7 +259,7 @@ def _stream_missing(
 
     quiet = bool(getattr(console, "quiet", False))
     progress = _build_progress(quiet, console)
-    in_flight_tracker = _InFlightRegistry[WorkItem]()
+    in_flight_tracker = _InFlightRegistry[_ActiveDownload]()
     counts = _OutcomeCounts()
     live_state = _LiveProgressState()
 
@@ -546,7 +571,7 @@ def _stream_one(
     item: WorkItem,
     estimated_billable_bytes: int | None = None,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
-    in_flight: _InFlightRegistry[WorkItem] | None = None,
+    in_flight: _InFlightRegistry[_ActiveDownload] | None = None,
 ) -> tuple[DownloadOutcome, str]:
     day = item.day
     dest = canonical_path(config.data_dir, item.symbol, item.schema, day)
@@ -562,7 +587,11 @@ def _stream_one(
         start=day,
         end=day + timedelta(days=1),
     )
-    token = in_flight.add(item) if in_flight is not None else None
+    token = (
+        in_flight.add(_ActiveDownload(item, tmp, estimated_billable_bytes))
+        if in_flight is not None
+        else None
+    )
     try:
         try:
             tmp.unlink(missing_ok=True)

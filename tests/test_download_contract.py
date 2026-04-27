@@ -1477,6 +1477,49 @@ def test_stream_missing_defers_panel_rendering_to_live_refresh(
     assert hasattr(live_renderables[0], "__rich__")
 
 
+def test_download_progress_label_reads_active_tmp_bytes(tmp_path: Path) -> None:
+    tmp = tmp_path / ".2026-04-01.dbn.tmp"
+    tmp.write_bytes(b"x" * 1536)
+    active = runner_stream._ActiveDownload(
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
+        tmp,
+        2048,
+    )
+
+    assert runner_stream._download_progress_label(active) == (
+        "1.5 KiB / 2.0 KiB (75.0%)"
+    )
+
+
+def test_progress_panel_lists_every_active_download(tmp_path: Path) -> None:
+    console = Console(record=True, width=160)
+    progress = runner_stream._build_progress(False, console)
+    tracker = runner_stream._InFlightRegistry[runner_stream._ActiveDownload]()
+    for index in range(10):
+        item = WorkItem(
+            symbol=f"S{index}.FUT",
+            schema="mbo",
+            day=date(2026, 4, 1),
+        )
+        tmp = tmp_path / f".{index}.tmp"
+        tmp.write_bytes(b"x" * (index + 1))
+        _ = tracker.add(runner_stream._ActiveDownload(item, tmp, None))
+
+    panel = runner_stream._render_progress_panel(
+        progress,
+        tracker,
+        runner_stream._OutcomeCounts(),
+        max_workers=10,
+        active_workers=10,
+    )
+    console.print(panel)
+    output = console.export_text()
+
+    assert "S0.FUT/mbo" in output
+    assert "S9.FUT/mbo" in output
+    assert "and 2 more" not in output
+
+
 def test_download_result_enforces_accounting_invariant() -> None:
     with pytest.raises(ValueError, match="invariant"):
         DownloadResult(total=1, placed=1, cached=0, no_data=1, failed=0)
