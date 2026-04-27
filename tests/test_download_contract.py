@@ -729,7 +729,7 @@ def test_progress_worker_display_uses_remaining_executor_capacity() -> None:
     assert runner_stream._display_active_workers(100, 100, 30) == 0
 
 
-def test_cost_estimation_uses_one_span_per_missing_pair() -> None:
+def test_cost_estimation_uses_one_span_per_contiguous_missing_run() -> None:
     client = FakeClient()
     work = [
         WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
@@ -739,10 +739,11 @@ def test_cost_estimation_uses_one_span_per_missing_pair() -> None:
     estimates = _estimate_costs(client, work, max_workers=1)
 
     assert [(query.start, query.end) for query in client.cost_queries] == [
-        (date(2026, 4, 1), date(2026, 4, 4)),
+        (date(2026, 4, 1), date(2026, 4, 2)),
+        (date(2026, 4, 3), date(2026, 4, 4)),
     ]
-    assert estimates[0].cost_cents == 7
-    assert estimates[0].size_bytes == 11
+    assert estimates[0].cost_cents == 14
+    assert estimates[0].size_bytes == 22
 
 
 def test_cost_estimation_shows_progress_when_console_is_visible() -> None:
@@ -757,7 +758,7 @@ def test_cost_estimation_shows_progress_when_console_is_visible() -> None:
 
     output = console.export_text()
     assert "Estimating Databento cost and billable size" in output
-    assert "2 symbol/schema spans" in output
+    assert "2 missing date ranges" in output
     assert "Price quote requests" in output
     assert "Price quote complete" in output
 
@@ -786,6 +787,10 @@ def test_cost_estimation_rounds_once_after_range_aggregation() -> None:
 
     estimates = _estimate_costs(client, work, max_workers=1)
 
+    assert [(query.start, query.end) for query in client.cost_queries] == [
+        (date(2026, 4, 1), date(2026, 4, 2)),
+        (date(2026, 4, 3), date(2026, 4, 4)),
+    ]
     assert estimates[0].cost_cents == 1
 
 
@@ -1486,10 +1491,7 @@ def test_download_progress_label_reads_active_tmp_bytes(tmp_path: Path) -> None:
         2048,
     )
 
-    assert (
-        runner_stream._download_progress_label(active)
-        == "1.5 KiB downloaded; 2.0 KiB billable est"
-    )
+    assert runner_stream._download_progress_label(active) == "1.5 KiB downloaded"
 
 
 def test_progress_panel_lists_every_active_download(tmp_path: Path) -> None:

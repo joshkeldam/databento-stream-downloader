@@ -195,7 +195,7 @@ def _estimate_costs(
             raise RuntimeError("estimate progress requires a console")
         console.print(
             "Estimating Databento cost and billable size for "
-            f"{len(ranges):,} symbol/schema span"
+            f"{len(ranges):,} missing date range"
             f"{'' if len(ranges) == 1 else 's'} with {workers} metadata "
             f"worker{'' if workers == 1 else 's'}..."
         )
@@ -591,19 +591,24 @@ def _log_estimate_range_split(
 
 
 def _cost_ranges(work: Iterable[WorkItem]) -> list[tuple[str, str, date, date]]:
-    ranges_by_key: dict[WorkKey, tuple[date, date]] = {}
+    days_by_key: dict[WorkKey, set[date]] = {}
     for item in work:
         key = (item.symbol, item.schema)
-        current = ranges_by_key.get(key)
-        if current is None:
-            ranges_by_key[key] = (item.day, item.day)
-            continue
-        start, end = current
-        ranges_by_key[key] = (min(start, item.day), max(end, item.day))
+        days_by_key.setdefault(key, set()).add(item.day)
 
     ranges: list[tuple[str, str, date, date]] = []
-    for (symbol, schema), (start, end) in sorted(ranges_by_key.items()):
-        ranges.append((symbol, schema, start, end + timedelta(days=1)))
+    for (symbol, schema), days in sorted(days_by_key.items()):
+        sorted_days = sorted(days)
+        run_start = sorted_days[0]
+        run_end = run_start
+        for day in sorted_days[1:]:
+            if day == run_end + timedelta(days=1):
+                run_end = day
+                continue
+            ranges.append((symbol, schema, run_start, run_end + timedelta(days=1)))
+            run_start = day
+            run_end = day
+        ranges.append((symbol, schema, run_start, run_end + timedelta(days=1)))
     return ranges
 
 

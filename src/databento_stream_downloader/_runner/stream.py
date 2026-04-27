@@ -187,13 +187,7 @@ def _render_progress_panel(
 
 def _download_progress_label(active: _ActiveDownload) -> str:
     downloaded_bytes = _stat_downloaded_bytes(active.tmp_path)
-    estimated_bytes = active.estimated_bytes
-    if estimated_bytes is None or estimated_bytes <= 0:
-        return f"{_bytes(downloaded_bytes)} downloaded"
-    return (
-        f"{_bytes(downloaded_bytes)} downloaded; "
-        f"{_bytes(estimated_bytes)} billable est"
-    )
+    return f"{_bytes(downloaded_bytes)} downloaded"
 
 
 def _stat_downloaded_bytes(path: Path) -> int:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from itertools import pairwise
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -60,9 +61,7 @@ def test_cost_ranges_cover_input_span(offsets: list[int]) -> None:
             covered.add(day)
             day += timedelta(days=1)
 
-    assert days <= covered
-    assert min(covered) == min(days)
-    assert max(covered) == max(days)
+    assert covered == days
 
 
 @given(
@@ -109,18 +108,23 @@ def test_cost_ranges_collapse_contiguous_non_mbo_days(length: int) -> None:
         unique=True,
     )
 )
-def test_cost_ranges_use_single_span_across_gaps(offsets: list[int]) -> None:
+def test_cost_ranges_split_at_missing_day_gaps(offsets: list[int]) -> None:
     sorted_offsets = sorted(offsets)
     work = _work_items_for_offsets_and_schema(sorted_offsets, "definition")
+    ranges = _cost_ranges(work)
 
-    assert _cost_ranges(work) == [
-        (
-            "ES.FUT",
-            "definition",
-            _BASE_DAY + timedelta(days=sorted_offsets[0]),
-            _BASE_DAY + timedelta(days=sorted_offsets[-1] + 1),
-        )
-    ]
+    covered_offsets: list[int] = []
+    for _symbol, _schema, start, end in ranges:
+        day = start
+        while day < end:
+            covered_offsets.append((day - _BASE_DAY).days)
+            day += timedelta(days=1)
+
+    assert covered_offsets == sorted_offsets
+    assert all(
+        right[2] >= left[3] + timedelta(days=1)
+        for left, right in pairwise(ranges)
+    )
 
 
 @given(
