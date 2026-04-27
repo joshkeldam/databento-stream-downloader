@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Iterable, Sized
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -51,11 +51,17 @@ class _SidecarRepairState:
 def _validate(
     config: DownloadConfig,
     console: Console,
-    items: list[WorkItem],
+    items: Iterable[WorkItem],
 ) -> int:
     console.print("\n[bold]Validating downloads...[/bold]")
+    total = _len_or_none(items)
+    if total == 0:
+        console.print("No cached partitions found in scope.")
+        return 0
     issues = 0
     checked = 0
+    item_iter = iter(items)
+    workers = _bounded_worker_count(config, total)
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -64,21 +70,39 @@ def _validate(
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Validating", total=len(items))
-        workers = max(1, min(config.max_workers, len(items)))
+        task = progress.add_task("Validating", total=total)
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_validate_one, config, item) for item in items]
-            for future in as_completed(futures):
-                item, error = future.result()
-                if error is None:
-                    checked += 1
-                else:
-                    issues += 1
-                    progress.console.print(
-                        f"  [red]✗[/red] {item.symbol}/{item.schema} "
-                        f"{item.day}: {error}"
-                    )
-                progress.advance(task)
+            futures: set[Future[tuple[WorkItem, str | None]]] = set()
+
+            def submit_next() -> bool:
+                try:
+                    item = next(item_iter)
+                except StopIteration:
+                    return False
+                futures.add(pool.submit(_validate_one, config, item))
+                return True
+
+            for _ in range(workers):
+                if not submit_next():
+                    break
+            if not futures:
+                console.print("No cached partitions found in scope.")
+                return 0
+            while futures:
+                for future in as_completed(futures):
+                    futures.remove(future)
+                    item, error = future.result()
+                    if error is None:
+                        checked += 1
+                    else:
+                        issues += 1
+                        progress.console.print(
+                            f"  [red]✗[/red] {item.symbol}/{item.schema} "
+                            f"{item.day}: {error}"
+                        )
+                    progress.advance(task)
+                    submit_next()
+                    break
     if issues:
         console.print(f"  [red]✗[/red] {issues} validation issues")
         return issues
@@ -121,26 +145,41 @@ def _validate_one(
 
 def _validate_cached_metadata_preflight(
     config: DownloadConfig,
-    items: Collection[WorkItem],
+    items: Iterable[WorkItem],
     console: Console,
 ) -> int:
-    if not items:
+    total = _len_or_none(items)
+    if total == 0:
         return 0
     issues = 0
-    workers = max(1, min(config.max_workers, len(items)))
+    item_iter = iter(items)
+    workers = _bounded_worker_count(config, total)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(_validate_cached_metadata_one, config, item) for item in items
-        ]
-        for future in as_completed(futures):
-            item, error = future.result()
-            if error is None:
-                continue
-            issues += 1
-            console.print(
-                f"  [red]✗[/red] {item.symbol}/{item.schema} "
-                f"{item.day}: invalid cached DBN: {error}"
-            )
+        futures: set[Future[tuple[WorkItem, str | None]]] = set()
+
+        def submit_next() -> bool:
+            try:
+                item = next(item_iter)
+            except StopIteration:
+                return False
+            futures.add(pool.submit(_validate_cached_metadata_one, config, item))
+            return True
+
+        for _ in range(workers):
+            if not submit_next():
+                break
+        while futures:
+            for future in as_completed(futures):
+                futures.remove(future)
+                item, error = future.result()
+                if error is not None:
+                    issues += 1
+                    console.print(
+                        f"  [red]✗[/red] {item.symbol}/{item.schema} "
+                        f"{item.day}: invalid cached DBN: {error}"
+                    )
+                submit_next()
+                break
     return issues
 
 
@@ -173,41 +212,69 @@ def _validate_cached_metadata_one(
 
 def _repair_missing_sidecars(
     config: DownloadConfig,
-    items: Collection[WorkItem],
+    items: Iterable[WorkItem],
     console: Console,
     *,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
 ) -> int:
-    needs_repair: list[tuple[WorkItem, _SidecarRepairState]] = []
-    for item in items:
-        state = _sidecar_repair_state_for_item(config, item)
-        if state.kind != "ok":
-            needs_repair.append((item, state))
-    if not needs_repair:
-        return 0
     issues = 0
-    workers = max(1, min(config.max_workers, len(needs_repair)))
+    total = _len_or_none(items)
+    if total == 0:
+        return 0
+    item_iter = iter(items)
+    workers = _bounded_worker_count(config, total)
+    exhausted = False
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(_repair_one_sidecar, config, item, fsync_tracker, state)
-            for item, state in needs_repair
-        ]
-        for future in as_completed(futures):
-            item, error, repaired = future.result()
-            if error is not None:
-                issues += 1
-                console.print(
-                    f"  [red]✗[/red] {item.symbol}/{item.schema} "
-                    f"{item.day}: cannot repair sidecar: {error}"
+        futures: set[Future[tuple[WorkItem, str | None, bool]]] = set()
+
+        def fill_pending() -> None:
+            nonlocal exhausted
+            while len(futures) < workers and not exhausted:
+                try:
+                    item = next(item_iter)
+                except StopIteration:
+                    exhausted = True
+                    return
+                state = _sidecar_repair_state_for_item(config, item)
+                if state.kind == "ok":
+                    continue
+                futures.add(
+                    pool.submit(_repair_one_sidecar, config, item, fsync_tracker, state)
                 )
-            if repaired:
-                LOGGER.info(
-                    "sidecar_repaired",
-                    symbol=item.symbol,
-                    schema=item.schema,
-                    day=item.day.isoformat(),
-                )
+
+        fill_pending()
+        while futures:
+            for future in as_completed(futures):
+                futures.remove(future)
+                item, error, repaired = future.result()
+                if error is not None:
+                    issues += 1
+                    console.print(
+                        f"  [red]✗[/red] {item.symbol}/{item.schema} "
+                        f"{item.day}: cannot repair sidecar: {error}"
+                    )
+                if repaired:
+                    LOGGER.info(
+                        "sidecar_repaired",
+                        symbol=item.symbol,
+                        schema=item.schema,
+                        day=item.day.isoformat(),
+                    )
+                fill_pending()
+                break
     return issues
+
+
+def _len_or_none(items: Iterable[WorkItem]) -> int | None:
+    if isinstance(items, Sized):
+        return len(items)
+    return None
+
+
+def _bounded_worker_count(config: DownloadConfig, total: int | None) -> int:
+    if total is None:
+        return max(1, config.max_workers)
+    return max(1, min(config.max_workers, total))
 
 
 def _sidecar_needs_repair(config: DownloadConfig, item: WorkItem) -> bool:

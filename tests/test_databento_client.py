@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import errno
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from threading import Barrier
 from types import SimpleNamespace
 from typing import Any, ClassVar, NoReturn, cast
 
@@ -21,6 +23,7 @@ from databento.common.error import (
 )
 
 from databento_stream_downloader.databento_client import (
+    _RETRY_AFTER_CAP_SECONDS,
     DatabentoClient,
     _apply_sdk_timeout,
     _is_retryable_os_error,
@@ -96,10 +99,38 @@ def test_retry_exhaustion_uses_backoff_without_final_sleep() -> None:
     def fail() -> NoReturn:
         raise BentoServerError(http_status=500, message="server")
 
-    with pytest.raises(RetryableError):
+    with pytest.raises(RetryableError, match="last_error=BentoServerError"):
         client._with_retry(fail)
 
     assert sleeps == [1.0, 2.0]
+
+
+def test_metadata_retry_exhaustion_uses_longer_backoff() -> None:
+    sleeps: list[float] = []
+    client = _client(sleeps=sleeps)
+
+    def fail() -> NoReturn:
+        raise BentoClientError(http_status=429, message="rate limit")
+
+    with pytest.raises(RetryableError, match="last_error=BentoClientError"):
+        client._with_retry(fail, operation="estimate_cost")
+
+    assert sleeps == [2.0, 4.0, 8.0, 16.0, 32.0]
+    assert client.retry_counts_by_operation == {"estimate_cost": 5}
+
+
+def test_stream_retry_exhaustion_uses_mbo_backoff() -> None:
+    sleeps: list[float] = []
+    client = _client(sleeps=sleeps)
+
+    def fail() -> NoReturn:
+        raise BentoError("Error streaming response: reset")
+
+    with pytest.raises(RetryableError, match="6 attempts"):
+        client._with_retry(fail, operation="stream_to_file")
+
+    assert sleeps == [2.0, 4.0, 8.0, 16.0, 32.0]
+    assert client.retry_counts_by_operation == {"stream_to_file": 5}
 
 
 def test_retry_succeeds_after_transient_error() -> None:
@@ -120,6 +151,78 @@ def test_retry_succeeds_after_transient_error() -> None:
     assert client.retry_counts_by_operation == {"request": 1}
 
 
+def test_retry_attempts_are_debug_logged_and_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class Logger:
+        def debug(self, event: str, **kwargs: object) -> None:
+            events.append(("debug", event, kwargs))
+
+        def warning(self, event: str, **kwargs: object) -> None:
+            events.append(("warning", event, kwargs))
+
+    monkeypatch.setattr(
+        "databento_stream_downloader.databento_client.LOGGER",
+        Logger(),
+    )
+    client = _client(sleeps=sleeps)
+    attempts = 0
+
+    def flaky() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise BentoClientError(http_status=429, message="rate limit")
+        return "ok"
+
+    assert client._with_retry(flaky, operation="estimate_cost") == "ok"
+
+    assert client.retry_counts_by_operation == {"estimate_cost": 1}
+    assert [event for level, event, _kwargs in events if level == "debug"] == [
+        "retrying_databento_request"
+    ]
+    assert [event for level, event, _kwargs in events if level == "warning"] == []
+
+
+def test_retry_exhaustion_warns_once_with_aggregate_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class Logger:
+        def debug(self, event: str, **kwargs: object) -> None:
+            events.append(("debug", event, kwargs))
+
+        def warning(self, event: str, **kwargs: object) -> None:
+            events.append(("warning", event, kwargs))
+
+    monkeypatch.setattr(
+        "databento_stream_downloader.databento_client.LOGGER",
+        Logger(),
+    )
+    client = _client(sleeps=sleeps)
+
+    def fail() -> NoReturn:
+        raise BentoClientError(http_status=429, message="rate limit")
+
+    with pytest.raises(RetryableError):
+        client._with_retry(fail, operation="estimate_cost")
+
+    assert client.retry_counts_by_operation == {"estimate_cost": 5}
+    assert [event for level, event, _kwargs in events if level == "warning"] == [
+        "databento_retries_exhausted"
+    ]
+    warning_kwargs = next(
+        kwargs for level, _event, kwargs in events if level == "warning"
+    )
+    assert warning_kwargs["retry_sleeps"] == 5
+    assert warning_kwargs["attempts"] == 6
+
+
 def test_retry_honors_retry_after_header() -> None:
     sleeps: list[float] = []
     client = _client(sleeps=sleeps)
@@ -138,6 +241,16 @@ def test_retry_honors_retry_after_header() -> None:
 
     assert client._with_retry(flaky) == "ok"
     assert sleeps == [7.0]
+
+
+def test_retry_after_numeric_header_is_capped() -> None:
+    exc = BentoClientError(
+        http_status=429,
+        message="rate limit",
+        headers={"Retry-After": "9999999"},
+    )
+
+    assert _retry_after_seconds(exc) == _RETRY_AFTER_CAP_SECONDS
 
 
 def test_retry_after_parses_missing_header_as_none() -> None:
@@ -165,6 +278,17 @@ def test_retry_after_parses_http_date(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert delay is not None
     assert delay > 0
+
+
+def test_retry_after_http_date_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    class HeaderError(Exception):
+        headers: ClassVar[dict[str, str]] = {
+            "Retry-After": "Wed, 21 Oct 2030 07:28:00 GMT"
+        }
+
+    monkeypatch.setattr("time.time", lambda: 0.0)
+
+    assert _retry_after_seconds(HeaderError()) == _RETRY_AFTER_CAP_SECONDS
 
 
 def test_retry_after_ignores_invalid_header() -> None:
@@ -332,6 +456,74 @@ def test_sdk_timeout_warning_when_api_surface_lacks_timeout(
     ]
 
 
+def test_sdk_timeout_warning_when_assignment_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class Logger:
+        def warning(self, event: str, **kwargs: object) -> None:
+            events.append((event, kwargs))
+
+    class ReadOnlyTimeout:
+        def __get__(self, _instance: object, _owner: object) -> float:
+            return 100.0
+
+        def __set__(self, _instance: object, _value: object) -> None:
+            raise AttributeError("read-only")
+
+    class Api:
+        TIMEOUT = ReadOnlyTimeout()
+
+    class Historical:
+        metadata = Api()
+        timeseries = Api()
+
+    monkeypatch.setattr(
+        "databento_stream_downloader.databento_client.LOGGER",
+        Logger(),
+    )
+
+    _apply_sdk_timeout(cast("Any", Historical()), 12.5)
+
+    assert [kwargs["reason"] for _event, kwargs in events] == [
+        "assignment_failed",
+        "assignment_failed",
+    ]
+
+
+def test_sdk_timeout_warning_when_assignment_does_not_take(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class Logger:
+        def warning(self, event: str, **kwargs: object) -> None:
+            events.append((event, kwargs))
+
+    class Api:
+        TIMEOUT = 100.0
+
+        def __setattr__(self, _name: str, _value: object) -> None:
+            return
+
+    class Historical:
+        metadata = Api()
+        timeseries = Api()
+
+    monkeypatch.setattr(
+        "databento_stream_downloader.databento_client.LOGGER",
+        Logger(),
+    )
+
+    _apply_sdk_timeout(cast("Any", Historical()), 12.5)
+
+    assert [kwargs["reason"] for _event, kwargs in events] == [
+        "assignment_not_observed",
+        "assignment_not_observed",
+    ]
+
+
 def test_sdk_timeout_contract_matches_pinned_databento_sdk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -354,7 +546,7 @@ def test_sdk_timeout_contract_matches_pinned_databento_sdk(
     assert not any(event == "sdk_timeout_not_applied" for event, _kwargs in events)
 
 
-def test_thread_local_client_is_created_once_per_thread(
+def test_sdk_client_is_thread_local(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created: list[str] = []
@@ -376,10 +568,21 @@ def test_thread_local_client_is_created_once_per_thread(
 
     first = client._client()
     second = client._client()
+    barrier = Barrier(4)
+
+    def get_client(_index: int) -> object:
+        barrier.wait()
+        return client._client()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        threaded = list(pool.map(get_client, range(4)))
 
     assert first is second
-    assert created == ["test-key"]
+    assert all(item is not first for item in threaded)
+    assert len({id(item) for item in threaded}) == 4
+    assert created == ["test-key"] * 5
     assert first.metadata.TIMEOUT == 12.5
+    assert all(cast("Any", item).metadata.TIMEOUT == 12.5 for item in threaded)
 
 
 @pytest.mark.parametrize(
@@ -556,6 +759,38 @@ def test_estimate_cost_wraps_unstructured_bento_errors(
         )
 
 
+def test_estimate_cost_retries_without_list_price_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(sleeps=[])
+
+    class Metadata:
+        def get_cost(self, **_kwargs: object) -> float:
+            raise BentoServerError(http_status=503, message="")
+
+        def get_billable_size(self, **_kwargs: object) -> int:
+            raise AssertionError("estimate_cost should not use size fallback")
+
+        def list_unit_prices(self, **_kwargs: object) -> list[dict[str, object]]:
+            raise AssertionError("estimate_cost should not use unit-price fallback")
+
+    class Historical:
+        metadata = Metadata()
+
+    monkeypatch.setattr(client, "_client", lambda: Historical())
+
+    with pytest.raises(RetryableError, match="6 attempts"):
+        client.estimate_cost(
+            CostQuery(
+                dataset="GLBX.MDP3",
+                symbol="6A.FUT",
+                schema="mbo",
+                start=date(2026, 4, 1),
+                end=date(2026, 4, 2),
+            )
+        )
+
+
 def test_estimate_size_classifies_structured_client_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -650,6 +885,46 @@ def test_client_methods_delegate_to_sdk_shape(
     assert client.estimate_size(cost_query) == 456
     client.stream_to_file(stream_query, output)
     assert output.read_bytes() == b"dbn"
+
+
+def test_stream_to_file_cleans_output_before_each_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = _client(sleeps=[])
+    output = tmp_path / "out.dbn.zst"
+    output.write_bytes(b"partial")
+    attempts = 0
+
+    class Timeseries:
+        def get_range(self, **kwargs: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            path = Path(str(kwargs["path"]))
+            assert not path.exists()
+            if attempts == 1:
+                path.write_bytes(b"partial")
+                raise BentoError("Error streaming response: reset")
+            path.write_bytes(b"complete")
+
+    class Historical:
+        timeseries = Timeseries()
+
+    monkeypatch.setattr(client, "_client", lambda: Historical())
+
+    client.stream_to_file(
+        StreamQuery(
+            dataset="GLBX.MDP3",
+            symbol="ES.FUT",
+            schema="mbo",
+            start=date(2026, 4, 1),
+            end=date(2026, 4, 2),
+        ),
+        output,
+    )
+
+    assert output.read_bytes() == b"complete"
+    assert attempts == 2
 
 
 @pytest.mark.parametrize("status", [401, 402, 403])

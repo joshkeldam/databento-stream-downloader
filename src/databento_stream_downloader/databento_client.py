@@ -5,7 +5,6 @@ from __future__ import annotations
 import errno
 import re
 import socket
-import threading
 import time
 import warnings
 from collections.abc import Callable
@@ -13,7 +12,8 @@ from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from random import uniform
-from typing import Never, TypeVar
+from threading import Lock, local
+from typing import Never, TypeVar, cast
 
 import databento
 import structlog
@@ -36,6 +36,7 @@ from databento_stream_downloader.pricing import dollars_to_decimal
 
 _T = TypeVar("_T")
 LOGGER = structlog.get_logger(__name__)
+_MISSING = object()
 
 _HTTP_TOO_MANY_REQUESTS = 429
 _HTTP_REQUEST_TIMEOUT = 408
@@ -45,8 +46,15 @@ _HTTP_FORBIDDEN = 403
 _HTTP_PAYMENT_REQUIRED = 402
 _HTTP_SERVER_ERROR_MIN = 500
 _MAX_RETRIES = 3
+_MAX_METADATA_RETRIES = 6
+_MAX_STREAM_RETRIES = 6
 _RETRY_BASE_SECONDS = 1.0
+_METADATA_RETRY_BASE_SECONDS = 2.0
+_STREAM_RETRY_BASE_SECONDS = 2.0
 _RETRY_CAP_SECONDS = 8.0
+_METADATA_RETRY_CAP_SECONDS = 60.0
+_STREAM_RETRY_CAP_SECONDS = 60.0
+_RETRY_AFTER_CAP_SECONDS = _RETRY_CAP_SECONDS * 4
 _RETRYABLE_OS_ERRORS = {
     errno.ECONNABORTED,
     errno.ECONNRESET,
@@ -117,10 +125,10 @@ class DatabentoClient:
         self._sleep = sleep
         self._jitter = jitter
         self._request_timeout_seconds = request_timeout_seconds
-        self._thread_state = _ThreadState()
+        self._client_state = local()
         self._retry_count = 0
         self._retry_counts_by_operation: dict[str, int] = {}
-        self._retry_lock = threading.Lock()
+        self._retry_lock = Lock()
 
     def estimate_cost(self, query: CostQuery) -> Decimal:
         client = self._client()
@@ -165,6 +173,9 @@ class DatabentoClient:
         client = self._client()
 
         def _stream() -> object:
+            # The Databento SDK opens path= targets with exclusive "x+b" and
+            # does not support byte-range resume, so retry attempts must start
+            # from a clean temp path.
             output_path.unlink(missing_ok=True)
             return client.timeseries.get_range(
                 dataset=query.dataset,
@@ -199,24 +210,33 @@ class DatabentoClient:
         write_empty_dbn_file(query, output_path)
 
     def _client(self) -> databento.Historical:
-        client = self._thread_state.client
-        if client is None:
-            client = databento.Historical(key=self._api_key)
-            _apply_sdk_timeout(client, self._request_timeout_seconds)
-            self._thread_state.client = client
-        return client
+        instance = getattr(self._client_state, "instance", None)
+        if instance is None:
+            instance = databento.Historical(key=self._api_key)
+            _apply_sdk_timeout(instance, self._request_timeout_seconds)
+            self._client_state.instance = instance
+        return cast("databento.Historical", instance)
 
     def _with_retry(self, fn: Callable[[], _T], *, operation: str = "request") -> _T:
         last_exc: BaseException | None = None
-        for attempt in range(_MAX_RETRIES):
+        max_attempts, base_seconds, cap_seconds = _retry_policy(operation)
+        for attempt in range(max_attempts):
             try:
                 return fn()
             except RetryableError as exc:
                 last_exc = exc
-                if attempt < _MAX_RETRIES - 1:
+                if attempt < max_attempts - 1:
                     self._record_retry(operation)
                     self._sleep(
-                        _logged_retry_delay(exc, attempt, self._jitter, operation)
+                        _logged_retry_delay(
+                            exc,
+                            attempt,
+                            self._jitter,
+                            operation,
+                            max_attempts=max_attempts,
+                            base_seconds=base_seconds,
+                            cap_seconds=cap_seconds,
+                        )
                     )
             except (BentoClientError, BentoServerError) as exc:
                 last_exc = exc
@@ -227,10 +247,18 @@ class DatabentoClient:
                 )
                 if not is_retryable:
                     raise
-                if attempt < _MAX_RETRIES - 1:
+                if attempt < max_attempts - 1:
                     self._record_retry(operation)
                     self._sleep(
-                        _logged_retry_delay(exc, attempt, self._jitter, operation)
+                        _logged_retry_delay(
+                            exc,
+                            attempt,
+                            self._jitter,
+                            operation,
+                            max_attempts=max_attempts,
+                            base_seconds=base_seconds,
+                            cap_seconds=cap_seconds,
+                        )
                     )
             except BentoError as exc:
                 if not _is_retryable_bento_error(exc):
@@ -241,10 +269,18 @@ class DatabentoClient:
                     )
                     raise
                 last_exc = exc
-                if attempt < _MAX_RETRIES - 1:
+                if attempt < max_attempts - 1:
                     self._record_retry(operation)
                     self._sleep(
-                        _logged_retry_delay(exc, attempt, self._jitter, operation)
+                        _logged_retry_delay(
+                            exc,
+                            attempt,
+                            self._jitter,
+                            operation,
+                            max_attempts=max_attempts,
+                            base_seconds=base_seconds,
+                            cap_seconds=cap_seconds,
+                        )
                     )
             except OSError as exc:
                 if not _is_retryable_os_error(exc):
@@ -252,14 +288,36 @@ class DatabentoClient:
                         f"non-retryable local I/O error: {exc}"
                     ) from exc
                 last_exc = exc
-                if attempt < _MAX_RETRIES - 1:
+                if attempt < max_attempts - 1:
                     self._record_retry(operation)
                     self._sleep(
-                        _logged_retry_delay(exc, attempt, self._jitter, operation)
+                        _logged_retry_delay(
+                            exc,
+                            attempt,
+                            self._jitter,
+                            operation,
+                            max_attempts=max_attempts,
+                            base_seconds=base_seconds,
+                            cap_seconds=cap_seconds,
+                        )
                     )
+        last_detail = ""
+        if last_exc is not None:
+            last_detail = f"; last_error={type(last_exc).__name__}: {last_exc}"
+            LOGGER.warning(
+                "databento_retries_exhausted",
+                operation=operation,
+                retry_sleeps=max_attempts - 1,
+                attempts=max_attempts,
+                last_error_type=type(last_exc).__name__,
+                last_error=str(last_exc),
+            )
+        attempt_word = "attempt" if max_attempts == 1 else "attempts"
+        retry_sleeps = max_attempts - 1
+        sleep_word = "sleep" if retry_sleeps == 1 else "sleeps"
         msg = (
-            f"retry attempts exhausted after {_MAX_RETRIES} attempts "
-            f"and {_MAX_RETRIES - 1} retry sleeps"
+            f"retry attempts exhausted after {max_attempts} {attempt_word} "
+            f"and {retry_sleeps} retry {sleep_word}{last_detail}"
         )
         raise RetryableError(msg) from last_exc
 
@@ -283,28 +341,26 @@ class DatabentoClient:
             )
 
 
-class _ThreadState(threading.local):
-    def __init__(self) -> None:
-        super().__init__()
-        self.client: databento.Historical | None = None
-
-
 def _logged_retry_delay(
     exc: BaseException,
     attempt: int,
     jitter: Callable[[float, float], float],
     operation: str,
+    *,
+    max_attempts: int,
+    base_seconds: float,
+    cap_seconds: float,
 ) -> float:
     retry_after = _retry_after_seconds(exc)
     if retry_after is not None:
         delay = retry_after
     else:
-        cap = min(_RETRY_BASE_SECONDS * (2**attempt), _RETRY_CAP_SECONDS)
+        cap = min(base_seconds * (2**attempt), cap_seconds)
         delay = jitter(0, cap)
-    LOGGER.warning(
+    LOGGER.debug(
         "retrying_databento_request",
         attempt=attempt + 1,
-        max_retries=_MAX_RETRIES,
+        max_retries=max_attempts,
         delay_seconds=round(delay, 3),
         status=getattr(exc, "http_status", None),
         error_type=type(exc).__name__,
@@ -313,6 +369,22 @@ def _logged_retry_delay(
         stream_restarts_from_byte_zero=operation == "stream_to_file",
     )
     return delay
+
+
+def _retry_policy(operation: str) -> tuple[int, float, float]:
+    if operation == "stream_to_file":
+        return (
+            _MAX_STREAM_RETRIES,
+            _STREAM_RETRY_BASE_SECONDS,
+            _STREAM_RETRY_CAP_SECONDS,
+        )
+    if operation in {"estimate_cost", "estimate_size"}:
+        return (
+            _MAX_METADATA_RETRIES,
+            _METADATA_RETRY_BASE_SECONDS,
+            _METADATA_RETRY_CAP_SECONDS,
+        )
+    return _MAX_RETRIES, _RETRY_BASE_SECONDS, _RETRY_CAP_SECONDS
 
 
 def _apply_sdk_timeout(client: databento.Historical, timeout_seconds: float) -> None:
@@ -327,7 +399,36 @@ def _apply_sdk_timeout(client: databento.Historical, timeout_seconds: float) -> 
             continue
         # Databento 0.75 reads TIMEOUT through the API instance. Setting this
         # instance attribute avoids changing the SDK class default process-wide.
-        api.TIMEOUT = timeout_seconds
+        api_obj = api
+        api_type = type(cast("object", api))
+        class_timeout_before = getattr(api_type, "TIMEOUT", _MISSING)
+        try:
+            api_obj.TIMEOUT = timeout_seconds
+        except (AttributeError, TypeError) as exc:
+            LOGGER.warning(
+                "sdk_timeout_not_applied",
+                api=api_name,
+                timeout_seconds=timeout_seconds,
+                reason="assignment_failed",
+                error_type=type(exc).__name__,
+            )
+            continue
+        if getattr(api_obj, "TIMEOUT", _MISSING) != timeout_seconds:
+            LOGGER.warning(
+                "sdk_timeout_not_applied",
+                api=api_name,
+                timeout_seconds=timeout_seconds,
+                reason="assignment_not_observed",
+            )
+            continue
+        class_timeout_after = getattr(api_type, "TIMEOUT", _MISSING)
+        if class_timeout_after != class_timeout_before:
+            LOGGER.warning(
+                "sdk_timeout_not_applied",
+                api=api_name,
+                timeout_seconds=timeout_seconds,
+                reason="class_timeout_mutated",
+            )
 
 
 def _is_semantic_no_data_422(exc: BaseException) -> bool:
@@ -357,16 +458,19 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
     if not value:
         return None
     if value.isdecimal():
-        return max(0.0, float(value))
+        return min(max(0.0, float(value)), _RETRY_AFTER_CAP_SECONDS)
     try:
         retry_at = parsedate_to_datetime(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
     if retry_at.tzinfo is None:
         return None
     # HTTP-date values are UTC instants; time.time() is seconds since the Unix
     # epoch, so subtracting them is timezone-stable.
-    return max(0.0, retry_at.timestamp() - time.time())
+    return min(
+        max(0.0, retry_at.timestamp() - time.time()),
+        _RETRY_AFTER_CAP_SECONDS,
+    )
 
 
 def _is_retryable_os_error(exc: OSError) -> bool:

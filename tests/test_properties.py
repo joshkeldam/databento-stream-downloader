@@ -35,14 +35,21 @@ _BASE_DAY = date(2026, 1, 1)
 
 
 def _work_items_for_offsets(offsets: list[int]) -> list[WorkItem]:
+    return _work_items_for_offsets_and_schema(offsets, "mbo")
+
+
+def _work_items_for_offsets_and_schema(
+    offsets: list[int],
+    schema: str,
+) -> list[WorkItem]:
     return [
-        WorkItem(symbol="ES.FUT", schema="mbo", day=_BASE_DAY + timedelta(days=offset))
+        WorkItem(symbol="ES.FUT", schema=schema, day=_BASE_DAY + timedelta(days=offset))
         for offset in offsets
     ]
 
 
 @given(st.lists(st.integers(min_value=0, max_value=365), min_size=1, max_size=40))
-def test_cost_ranges_cover_exact_input_days(offsets: list[int]) -> None:
+def test_cost_ranges_cover_input_span(offsets: list[int]) -> None:
     days = {_BASE_DAY + timedelta(days=offset) for offset in offsets}
     work = [WorkItem(symbol="ES.FUT", schema="mbo", day=day) for day in days]
 
@@ -53,7 +60,9 @@ def test_cost_ranges_cover_exact_input_days(offsets: list[int]) -> None:
             covered.add(day)
             day += timedelta(days=1)
 
-    assert covered == days
+    assert days <= covered
+    assert min(covered) == min(days)
+    assert max(covered) == max(days)
 
 
 @given(
@@ -75,11 +84,20 @@ def test_allocate_estimated_values_conserves_total_and_balances_items(
 
 
 @given(st.integers(min_value=1, max_value=80))
-def test_cost_ranges_collapse_contiguous_days(length: int) -> None:
+def test_cost_ranges_collapse_contiguous_mbo_days(length: int) -> None:
     work = _work_items_for_offsets(list(range(length)))
 
     assert _cost_ranges(work) == [
         ("ES.FUT", "mbo", _BASE_DAY, _BASE_DAY + timedelta(days=length))
+    ]
+
+
+@given(st.integers(min_value=1, max_value=80))
+def test_cost_ranges_collapse_contiguous_non_mbo_days(length: int) -> None:
+    work = _work_items_for_offsets_and_schema(list(range(length)), "definition")
+
+    assert _cost_ranges(work) == [
+        ("ES.FUT", "definition", _BASE_DAY, _BASE_DAY + timedelta(days=length))
     ]
 
 
@@ -91,44 +109,18 @@ def test_cost_ranges_collapse_contiguous_days(length: int) -> None:
         unique=True,
     )
 )
-def test_cost_ranges_split_exactly_at_gaps(offsets: list[int]) -> None:
+def test_cost_ranges_use_single_span_across_gaps(offsets: list[int]) -> None:
     sorted_offsets = sorted(offsets)
-    work = _work_items_for_offsets(sorted_offsets)
+    work = _work_items_for_offsets_and_schema(sorted_offsets, "definition")
 
-    expected: list[tuple[str, str, date, date]] = []
-    start_offset = sorted_offsets[0]
-    previous_offset = start_offset
-    for offset in sorted_offsets[1:]:
-        if offset == previous_offset + 1:
-            previous_offset = offset
-            continue
-        expected.append(
-            (
-                "ES.FUT",
-                "mbo",
-                _BASE_DAY + timedelta(days=start_offset),
-                _BASE_DAY + timedelta(days=previous_offset + 1),
-            )
-        )
-        start_offset = offset
-        previous_offset = offset
-    expected.append(
+    assert _cost_ranges(work) == [
         (
             "ES.FUT",
-            "mbo",
-            _BASE_DAY + timedelta(days=start_offset),
-            _BASE_DAY + timedelta(days=previous_offset + 1),
+            "definition",
+            _BASE_DAY + timedelta(days=sorted_offsets[0]),
+            _BASE_DAY + timedelta(days=sorted_offsets[-1] + 1),
         )
-    )
-
-    ranges = _cost_ranges(work)
-
-    assert ranges == expected
-    for _symbol, _schema, start, end in ranges:
-        assert start < end
-        assert end == max(
-            day + timedelta(days=1) for item in work if start <= (day := item.day) < end
-        )
+    ]
 
 
 @given(

@@ -148,7 +148,14 @@ def _sync_run(
         pool: ThreadPoolExecutor, item: SyncItem
     ) -> Future[tuple[SyncOutcome, str, int]]:
         if is_push:
-            return pool.submit(upload_one, client, item, in_flight)
+            return pool.submit(
+                upload_one,
+                client,
+                item,
+                in_flight,
+                data_dir=config.data_dir,
+                bucket=config.bucket,
+            )
         return pool.submit(
             download_one,
             client,
@@ -156,6 +163,8 @@ def _sync_run(
             in_flight,
             verify_sha256=config.verify_sha256,
             fsync_writes=config.fsync_writes,
+            data_dir=config.data_dir,
+            bucket=config.bucket,
         )
 
     def _submit_delete(

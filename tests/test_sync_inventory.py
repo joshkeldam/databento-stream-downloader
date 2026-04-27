@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -12,10 +13,12 @@ from databento_stream_downloader._sync.inventory import (
     _RemoteEntry,
     _should_skip,
     compute_plan,
+    list_remote,
     s3_key_for,
     walk_local,
 )
-from databento_stream_downloader._sync.types import SyncDirection
+from databento_stream_downloader._sync.types import PlanningMode, SyncDirection
+from databento_stream_downloader.s3_client import S3Client
 
 
 def test_should_skip_excludes_transient_and_lock_files() -> None:
@@ -117,6 +120,152 @@ def test_compute_plan_push_uploads_missing_and_size_mismatched(
     assert plan.total_transfer_bytes == 200
 
 
+def test_compute_plan_size_mode_skips_same_size_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "data" / "raw" / "same.dbn.zst"
+    local = {
+        "raw/same.dbn.zst": _LocalEntry(
+            path=path,
+            key="raw/same.dbn.zst",
+            size=3,
+            sidecar=None,
+            sha256="a" * 64,
+        )
+    }
+    remote = {
+        "raw/same.dbn.zst": _RemoteEntry(
+            key="raw/same.dbn.zst",
+            size=3,
+            sha256="b" * 64,
+        )
+    }
+
+    plan = compute_plan(
+        SyncDirection.PUSH,
+        local,
+        remote,
+        data_dir=tmp_path / "data",
+        prefix="",
+        delete=False,
+    )
+
+    assert plan.transfers == ()
+    assert plan.skipped == 1
+
+
+def test_compute_plan_sidecar_mode_transfers_same_size_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "data" / "raw" / "same.dbn.zst"
+    local = {
+        "raw/same.dbn.zst": _LocalEntry(
+            path=path,
+            key="raw/same.dbn.zst",
+            size=3,
+            sidecar=None,
+            sha256="a" * 64,
+        )
+    }
+    remote = {
+        "raw/same.dbn.zst": _RemoteEntry(
+            key="raw/same.dbn.zst",
+            size=3,
+            sha256="b" * 64,
+        )
+    }
+
+    plan = compute_plan(
+        SyncDirection.PUSH,
+        local,
+        remote,
+        data_dir=tmp_path / "data",
+        prefix="",
+        delete=False,
+        planning_mode=PlanningMode.SIDECAR,
+    )
+
+    assert {item.s3_key for item in plan.transfers} == {"raw/same.dbn.zst"}
+    assert plan.skipped == 0
+
+
+def test_compute_plan_digest_mismatch_transfers_paired_sidecar(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data" / "raw" / "same.dbn.zst"
+    sidecar = tmp_path / "data" / "raw" / "same.dbn.zst.sha256"
+    local = {
+        "raw/same.dbn.zst": _LocalEntry(
+            path=data,
+            key="raw/same.dbn.zst",
+            size=3,
+            sidecar=sidecar,
+            sha256="a" * 64,
+        ),
+        "raw/same.dbn.zst.sha256": _LocalEntry(
+            path=sidecar,
+            key="raw/same.dbn.zst.sha256",
+            size=80,
+            sidecar=None,
+        ),
+    }
+    remote = {
+        "raw/same.dbn.zst": _RemoteEntry(
+            key="raw/same.dbn.zst",
+            size=3,
+            sha256="b" * 64,
+        ),
+        "raw/same.dbn.zst.sha256": _RemoteEntry(
+            key="raw/same.dbn.zst.sha256",
+            size=80,
+        ),
+    }
+
+    plan = compute_plan(
+        SyncDirection.PUSH,
+        local,
+        remote,
+        data_dir=tmp_path / "data",
+        prefix="",
+        delete=False,
+        planning_mode=PlanningMode.SIDECAR,
+    )
+
+    assert {item.s3_key for item in plan.transfers} == {
+        "raw/same.dbn.zst",
+        "raw/same.dbn.zst.sha256",
+    }
+
+
+def test_compute_plan_pull_carries_remote_digest_for_verification(
+    tmp_path: Path,
+) -> None:
+    key = "raw/same.dbn.zst"
+    local = {
+        key: _LocalEntry(
+            path=tmp_path / "data" / key,
+            key=key,
+            size=3,
+            sidecar=None,
+            sha256="a" * 64,
+        )
+    }
+    remote = {key: _RemoteEntry(key=key, size=3, sha256="b" * 64)}
+
+    plan = compute_plan(
+        SyncDirection.PULL,
+        local,
+        remote,
+        data_dir=tmp_path / "data",
+        prefix="",
+        delete=False,
+        planning_mode=PlanningMode.HEAD_METADATA,
+    )
+
+    assert len(plan.transfers) == 1
+    assert plan.transfers[0].sha256 == "b" * 64
+
+
 def test_compute_plan_push_with_delete_promotes_extraneous(
     tmp_path: Path,
     sample_local: dict[str, _LocalEntry],
@@ -136,6 +285,7 @@ def test_compute_plan_push_with_delete_promotes_extraneous(
 
     assert plan.extraneous == ()
     assert {item.s3_key for item in plan.deletes} == {"raw/c.dbn.zst"}
+    assert all(item.local_path is None for item in plan.deletes)
     assert {item.s3_key for item in plan.transfers} == {
         "raw/a.dbn.zst",
         "raw/b.dbn.zst",
@@ -165,6 +315,112 @@ def test_compute_plan_pull_inverse_of_push(
     assert plan.deletes == ()
     assert plan.extraneous == ()  # no local-only items
     assert plan.total_transfer_bytes == 50
+    assert next(iter(plan.transfers)).local_path == (
+        tmp_path / "data" / "raw" / "c.dbn.zst"
+    ).resolve(strict=False)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "../escaped.dbn.zst",
+        r"..\escaped.dbn.zst",
+        "/etc/passwd",
+        r"C:\escaped.dbn.zst",
+        "raw/bad\x00key.dbn.zst",
+    ],
+)
+def test_compute_plan_pull_rejects_unsafe_remote_relkeys(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    remote = {key: _RemoteEntry(key=key, size=1)}
+
+    with pytest.raises(ValueError, match="remote S3 key"):
+        compute_plan(
+            SyncDirection.PULL,
+            {},
+            remote,
+            data_dir=tmp_path / "data",
+            prefix="",
+            delete=False,
+        )
+
+
+def test_compute_plan_pull_rejects_resolved_escape(tmp_path: Path) -> None:
+    key = "raw/link/escaped.dbn.zst"
+    data_dir = tmp_path / "data"
+    link = data_dir / "raw" / "link"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(tmp_path)
+
+    with pytest.raises(ValueError, match="escapes data directory"):
+        compute_plan(
+            SyncDirection.PULL,
+            {},
+            {key: _RemoteEntry(key=key, size=1)},
+            data_dir=data_dir,
+            prefix="",
+            delete=False,
+        )
+
+
+class _FakeS3Client:
+    def __init__(self, objects: list[dict[str, object]]) -> None:
+        self._objects = objects
+
+    def list_objects(self, prefix: str) -> list[dict[str, object]]:
+        assert prefix == "archive/"
+        return self._objects
+
+    def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+        assert key == "archive/raw/f.dbn.zst.sha256"
+        assert max_bytes > 0
+        return (("c" * 64) + "  f.dbn.zst\n").encode("ascii")
+
+    def head_object(self, key: str) -> dict[str, object]:
+        assert key == "archive/raw/f.dbn.zst"
+        return {"Metadata": {"sha256": "d" * 64}}
+
+
+def test_list_remote_rejects_unsafe_s3_keys(tmp_path: Path) -> None:
+    client = _FakeS3Client(
+        [{"Key": "archive/../../../tmp/escaped.txt", "Size": 1}],
+    )
+
+    with pytest.raises(ValueError, match="remote S3 key"):
+        list_remote(cast("S3Client", client), "archive", data_dir=tmp_path / "data")
+
+
+def test_list_remote_sidecar_mode_reads_remote_sidecar_digest(tmp_path: Path) -> None:
+    client = _FakeS3Client(
+        [
+            {"Key": "archive/raw/f.dbn.zst", "Size": 3},
+            {"Key": "archive/raw/f.dbn.zst.sha256", "Size": 80},
+        ],
+    )
+
+    remote = list_remote(
+        cast("S3Client", client),
+        "archive",
+        data_dir=tmp_path / "data",
+        planning_mode=PlanningMode.SIDECAR,
+    )
+
+    assert remote["raw/f.dbn.zst"].sha256 == "c" * 64
+
+
+def test_list_remote_head_metadata_mode_reads_remote_digest(tmp_path: Path) -> None:
+    client = _FakeS3Client([{"Key": "archive/raw/f.dbn.zst", "Size": 3}])
+
+    remote = list_remote(
+        cast("S3Client", client),
+        "archive",
+        data_dir=tmp_path / "data",
+        planning_mode=PlanningMode.HEAD_METADATA,
+    )
+
+    assert remote["raw/f.dbn.zst"].sha256 == "d" * 64
 
 
 def test_compute_plan_pull_with_delete_removes_local_only(

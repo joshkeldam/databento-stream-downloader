@@ -20,6 +20,7 @@ from botocore.exceptions import (
 from moto import mock_aws
 from rich.console import Console
 
+from databento_stream_downloader._runner.fsio import _exclusive_run_lock
 from databento_stream_downloader._sync import lifecycle as sync_lifecycle
 from databento_stream_downloader._sync.transfer import (
     delete_one,
@@ -27,6 +28,7 @@ from databento_stream_downloader._sync.transfer import (
     upload_one,
 )
 from databento_stream_downloader._sync.types import (
+    PlanningMode,
     SyncConfig,
     SyncDirection,
     SyncItem,
@@ -172,14 +174,15 @@ def test_download_one_verifies_sha256_and_rejects_mismatch(
         Key="raw/f.dbn.zst",
         Body=b"abc",
     )
+    dest = tmp_path / "out" / "f.dbn.zst"
     item = SyncItem(
-        local_path=tmp_path / "out" / "f.dbn.zst",
+        local_path=dest,
         s3_key="raw/f.dbn.zst",
         size_bytes=3,
         op="transfer",
         sha256="0" * 64,  # wrong
     )
-    item.local_path.parent.mkdir(parents=True)
+    dest.parent.mkdir(parents=True)
     client = S3Client(_BUCKET, region=_REGION)
     outcome, label, _moved = download_one(
         client,
@@ -190,7 +193,7 @@ def test_download_one_verifies_sha256_and_rejects_mismatch(
     )
     assert outcome == "failed"
     assert "sha256 mismatch" in label
-    assert not item.local_path.exists()  # tmp cleaned, no destination written
+    assert not dest.exists()  # tmp cleaned, no destination written
 
 
 def test_download_one_verifies_sha256_and_accepts_match(
@@ -203,14 +206,15 @@ def test_download_one_verifies_sha256_and_accepts_match(
         Body=b"abc",
     )
     digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    dest = tmp_path / "out" / "f.dbn.zst"
     item = SyncItem(
-        local_path=tmp_path / "out" / "f.dbn.zst",
+        local_path=dest,
         s3_key="raw/f.dbn.zst",
         size_bytes=3,
         op="transfer",
         sha256=digest,
     )
-    item.local_path.parent.mkdir(parents=True)
+    dest.parent.mkdir(parents=True)
     client = S3Client(_BUCKET, region=_REGION)
     outcome, _label, moved = download_one(
         client,
@@ -221,7 +225,7 @@ def test_download_one_verifies_sha256_and_accepts_match(
     )
     assert outcome == "transferred"
     assert moved == 3
-    assert item.local_path.read_bytes() == b"abc"
+    assert dest.read_bytes() == b"abc"
 
 
 def test_delete_one_local_path_removes_local_file(tmp_path: Path) -> None:
@@ -251,7 +255,7 @@ def test_delete_one_remote_path_invokes_client(s3_bucket: None) -> None:
     )
     client = S3Client(_BUCKET, region=_REGION)
     item = SyncItem(
-        local_path=Path("/dev/null"),
+        local_path=None,
         s3_key="raw/orphan.dbn.zst",
         size_bytes=1,
         op="delete",
@@ -268,7 +272,7 @@ def test_delete_one_remote_path_invokes_client(s3_bucket: None) -> None:
 
 def test_delete_one_returns_failed_on_retryable_remote(tmp_path: Path) -> None:
     item = SyncItem(
-        local_path=tmp_path / "x",
+        local_path=None,
         s3_key="raw/orphan.dbn.zst",
         size_bytes=1,
         op="delete",
@@ -390,6 +394,36 @@ def test_run_sync_returns_zero_when_nothing_to_do(
     )
     client = S3Client(_BUCKET, region=_REGION)
     assert sync_lifecycle.run_sync(config, client=client) == 0
+
+
+def test_run_sync_rejects_concurrent_archive_lock(
+    s3_bucket: None,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    config = SyncConfig(
+        direction=SyncDirection.PULL,
+        data_dir=data_dir,
+        bucket=_BUCKET,
+        region=_REGION,
+        mode=RunMode.EXECUTE,
+        yes=True,
+    )
+    client = S3Client(_BUCKET, region=_REGION)
+
+    with (
+        _exclusive_run_lock(
+            data_dir,
+            "download-run",
+            Console(file=io.StringIO(), force_terminal=False),
+            fsync_writes=False,
+        ),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        sync_lifecycle.run_sync(config, client=client)
+
+    assert exc_info.value.code == 2
 
 
 def test_run_sync_dry_run_returns_zero_without_transfer(
@@ -725,15 +759,38 @@ def test_sync_run_propagates_fatal_error_from_worker(
         )
 
 
-def test_sync_config_pull_strips_fsync_writes_only_for_push() -> None:
+def test_sync_config_rejects_fsync_writes_for_push() -> None:
+    with pytest.raises(Exception, match="fsync-writes only applies to pull"):
+        SyncConfig(
+            direction=SyncDirection.PUSH,
+            data_dir=Path.cwd() / "data",
+            bucket="b",
+            mode=RunMode.EXECUTE,
+            fsync_writes=True,
+        )
+
+
+def test_sync_config_allows_fsync_writes_for_pull() -> None:
     cfg = SyncConfig(
-        direction=SyncDirection.PUSH,
+        direction=SyncDirection.PULL,
         data_dir=Path.cwd() / "data",
         bucket="b",
         mode=RunMode.EXECUTE,
         fsync_writes=True,
     )
-    assert cfg.fsync_writes is False  # silently dropped on push
+    assert cfg.fsync_writes is True
+
+
+def test_verify_sha256_pull_uses_head_metadata_planning() -> None:
+    cfg = SyncConfig(
+        direction=SyncDirection.PULL,
+        data_dir=Path.cwd() / "data",
+        bucket="b",
+        mode=RunMode.EXECUTE,
+        verify_sha256=True,
+    )
+
+    assert sync_lifecycle._effective_planning_mode(cfg) is PlanningMode.HEAD_METADATA
 
 
 def test_sync_config_rejects_blank_bucket() -> None:

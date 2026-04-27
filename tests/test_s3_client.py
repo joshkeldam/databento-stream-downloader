@@ -81,6 +81,18 @@ def test_list_objects_paginates_under_prefix(
     assert keys[0] == "archives/file-0.dbn.zst"
 
 
+def test_read_object_bytes_returns_capped_range(
+    s3_bucket: None,
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "f.sha256"
+    src.write_bytes(b"abcdef")
+    client = S3Client(_BUCKET, region=_REGION)
+    client.upload_file(src, "archives/f.sha256")
+
+    assert client.read_object_bytes("archives/f.sha256", max_bytes=3) == b"abc"
+
+
 def test_delete_object_removes_key(
     s3_bucket: None,
     tmp_path: Path,

@@ -31,6 +31,10 @@ import databento_stream_downloader._runner.validation as runner_validation
 import databento_stream_downloader._runner.work as runner_work
 import databento_stream_downloader.dbn as dbn
 import databento_stream_downloader.runner as runner
+from databento_stream_downloader.archive_manifest import (
+    archive_manifest_path,
+    record_manifest_event,
+)
 from databento_stream_downloader.config import DownloadConfig, RunMode
 from databento_stream_downloader.dbn import validate_dbn_metadata, write_empty_dbn_file
 from databento_stream_downloader.errors import (
@@ -260,6 +264,34 @@ def test_deep_validation_rejects_decompression_cap(tmp_path: Path) -> None:
         validate_dbn_metadata(query, path, deep=True, max_decompressed_bytes=1)
 
 
+def test_strict_validation_rejects_decompression_cap_before_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    query = StreamQuery(
+        dataset=DATASET,
+        symbol="ES.FUT",
+        schema="mbo",
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 2),
+    )
+    path = tmp_path / "empty.dbn.zst"
+    write_empty_dbn_file(query, path)
+
+    def from_file(_path: object) -> NoReturn:
+        raise AssertionError("strict validation should enforce cap before DBNStore")
+
+    monkeypatch.setattr(dbn.databento.DBNStore, "from_file", from_file)
+
+    with pytest.raises(ValidationError, match="strict validation exceeded"):
+        validate_dbn_metadata(
+            query,
+            path,
+            strict=True,
+            max_decompressed_bytes=1,
+        )
+
+
 def test_validator_rejects_truncated_zstd_frame(tmp_path: Path) -> None:
     query = StreamQuery(
         dataset=DATASET,
@@ -425,7 +457,7 @@ def test_strict_validation_checks_real_dbn_store(tmp_path: Path) -> None:
     validate_dbn_metadata(query, path, strict=True)
 
 
-def test_strict_validation_uses_ts_event_when_ts_recv_absent(
+def test_strict_validation_rejects_end_boundary_ts_event_when_ts_recv_absent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -442,7 +474,7 @@ def test_strict_validation_uses_ts_event_when_ts_recv_absent(
     store = _FakeStore([records], {"ESM6": [{"symbol": "123"}]})
     _patch_dbn_store(monkeypatch, store)
 
-    with pytest.raises(ValidationError, match="ts_event outside requested UTC day"):
+    with pytest.raises(ValidationError, match=r"ts_event.*\[start, end\)"):
         validate_dbn_metadata(query, path, strict=True)
 
 
@@ -511,7 +543,7 @@ def test_strict_validation_rejects_missing_mappings(
         validate_dbn_metadata(query, path, strict=True)
 
 
-def test_strict_validation_rejects_out_of_bounds_ts_recv(
+def test_strict_validation_rejects_end_boundary_ts_recv(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -528,7 +560,7 @@ def test_strict_validation_rejects_out_of_bounds_ts_recv(
     store = _FakeStore([records], {"ESM6": [{"symbol": "123"}]})
     _patch_dbn_store(monkeypatch, store)
 
-    with pytest.raises(ValidationError, match="outside requested UTC day"):
+    with pytest.raises(ValidationError, match=r"ts_recv.*\[start, end\)"):
         validate_dbn_metadata(query, path, strict=True)
 
 
@@ -672,7 +704,31 @@ def test_stream_one_reraises_unexpected_exceptions(tmp_path: Path) -> None:
         _stream_one(config, BuggyClient(), item)
 
 
-def test_cost_estimation_uses_only_missing_days() -> None:
+def test_stream_one_removes_stale_tmp_once_before_streaming(tmp_path: Path) -> None:
+    class AssertCleanTmpClient(FakeClient):
+        def stream_to_file(self, query: StreamQuery, output_path: Path) -> None:
+            assert not output_path.exists()
+            super().stream_to_file(query, output_path)
+
+    config = _config(tmp_path)
+    item = WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))
+    dest = canonical_path(tmp_path, "ES.FUT", "mbo", date(2026, 4, 1))
+    dest.parent.mkdir(parents=True)
+    dest.with_name(f".{dest.stem}.tmp").write_bytes(b"stale")
+
+    outcome, _label = _stream_one(config, AssertCleanTmpClient(), item)
+
+    assert outcome == "placed"
+
+
+def test_progress_worker_display_uses_remaining_executor_capacity() -> None:
+    assert runner_stream._display_active_workers(100, 0, 30) == 30
+    assert runner_stream._display_active_workers(100, 1, 30) == 30
+    assert runner_stream._display_active_workers(100, 71, 30) == 29
+    assert runner_stream._display_active_workers(100, 100, 30) == 0
+
+
+def test_cost_estimation_uses_one_span_per_missing_pair() -> None:
     client = FakeClient()
     work = [
         WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
@@ -682,11 +738,37 @@ def test_cost_estimation_uses_only_missing_days() -> None:
     estimates = _estimate_costs(client, work, max_workers=1)
 
     assert [(query.start, query.end) for query in client.cost_queries] == [
-        (date(2026, 4, 1), date(2026, 4, 2)),
-        (date(2026, 4, 3), date(2026, 4, 4)),
+        (date(2026, 4, 1), date(2026, 4, 4)),
     ]
-    assert estimates[0].cost_cents == 14
-    assert estimates[0].size_bytes == 22
+    assert estimates[0].cost_cents == 7
+    assert estimates[0].size_bytes == 11
+
+
+def test_cost_estimation_shows_progress_when_console_is_visible() -> None:
+    client = FakeClient()
+    console = Console(record=True)
+    work = [
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
+        WorkItem(symbol="NQ.FUT", schema="mbo", day=date(2026, 4, 1)),
+    ]
+
+    _estimate_costs(client, work, max_workers=2, console=console)
+
+    output = console.export_text()
+    assert "Estimating Databento cost and billable size" in output
+    assert "2 symbol/schema spans" in output
+    assert "Price quote requests" in output
+    assert "Price quote complete" in output
+
+
+def test_cost_estimation_progress_respects_quiet_console() -> None:
+    client = FakeClient()
+    console = Console(record=True, quiet=True)
+    work = [WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))]
+
+    _estimate_costs(client, work, max_workers=1, console=console)
+
+    assert console.export_text() == ""
 
 
 def test_cost_estimation_rounds_once_after_range_aggregation() -> None:
@@ -706,7 +788,7 @@ def test_cost_estimation_rounds_once_after_range_aggregation() -> None:
     assert estimates[0].cost_cents == 1
 
 
-def test_cost_estimation_merges_contiguous_missing_days() -> None:
+def test_cost_estimation_merges_contiguous_mbo_days() -> None:
     client = FakeClient()
     work = [
         WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
@@ -721,6 +803,81 @@ def test_cost_estimation_merges_contiguous_missing_days() -> None:
     ]
     assert estimates[0].cost_cents == 7
     assert estimates[0].size_bytes == 11
+
+
+def test_cost_estimation_merges_contiguous_non_mbo_days() -> None:
+    client = FakeClient()
+    work = [
+        WorkItem(symbol="ES.FUT", schema="definition", day=date(2026, 4, 1)),
+        WorkItem(symbol="ES.FUT", schema="definition", day=date(2026, 4, 2)),
+        WorkItem(symbol="ES.FUT", schema="definition", day=date(2026, 4, 3)),
+    ]
+
+    estimates = _estimate_costs(client, work, max_workers=1)
+
+    assert [(query.start, query.end) for query in client.cost_queries] == [
+        (date(2026, 4, 1), date(2026, 4, 4)),
+    ]
+    assert estimates[0].cost_cents == 7
+    assert estimates[0].size_bytes == 11
+
+
+def test_cost_estimation_splits_retrying_ranges() -> None:
+    class SplittingClient(FakeClient):
+        def estimate_cost(self, query: CostQuery) -> Decimal:
+            self.cost_queries.append(query)
+            if query.start == date(2026, 4, 1) and query.end == date(2026, 4, 4):
+                raise RetryableError("range too large")
+            return Decimal("0.07")
+
+    client = SplittingClient()
+    work = [
+        WorkItem(symbol="ES.FUT", schema="definition", day=date(2026, 4, 1)),
+        WorkItem(symbol="ES.FUT", schema="definition", day=date(2026, 4, 2)),
+        WorkItem(symbol="ES.FUT", schema="definition", day=date(2026, 4, 3)),
+    ]
+
+    estimates = _estimate_costs(client, work, max_workers=1)
+
+    assert [(query.start, query.end) for query in client.cost_queries] == [
+        (date(2026, 4, 1), date(2026, 4, 4)),
+        (date(2026, 4, 1), date(2026, 4, 2)),
+        (date(2026, 4, 2), date(2026, 4, 4)),
+    ]
+    assert [(query.start, query.end) for query in client.size_queries] == [
+        (date(2026, 4, 1), date(2026, 4, 4)),
+    ]
+    assert estimates[0].cost_cents == 14
+    assert estimates[0].size_bytes == 11
+
+
+def test_cost_estimation_reuses_cost_when_size_range_splits() -> None:
+    class SplittingSizeClient(FakeClient):
+        def estimate_size(self, query: CostQuery) -> int:
+            self.size_queries.append(query)
+            if query.start == date(2026, 4, 1) and query.end == date(2026, 4, 4):
+                raise RetryableError("range too large")
+            return 11
+
+    client = SplittingSizeClient()
+    work = [
+        WorkItem(symbol="ES.FUT", schema="definition", day=date(2026, 4, 1)),
+        WorkItem(symbol="ES.FUT", schema="definition", day=date(2026, 4, 2)),
+        WorkItem(symbol="ES.FUT", schema="definition", day=date(2026, 4, 3)),
+    ]
+
+    estimates = _estimate_costs(client, work, max_workers=1)
+
+    assert [(query.start, query.end) for query in client.cost_queries] == [
+        (date(2026, 4, 1), date(2026, 4, 4)),
+    ]
+    assert [(query.start, query.end) for query in client.size_queries] == [
+        (date(2026, 4, 1), date(2026, 4, 4)),
+        (date(2026, 4, 1), date(2026, 4, 2)),
+        (date(2026, 4, 2), date(2026, 4, 4)),
+    ]
+    assert estimates[0].cost_cents == 7
+    assert estimates[0].size_bytes == 22
 
 
 def test_cost_estimation_cancels_pending_ranges_on_failure(
@@ -751,6 +908,61 @@ def test_cost_estimation_cancels_pending_ranges_on_failure(
         _estimate_costs(FakeClient(), work, max_workers=1)
 
     assert calls == ["ES.FUT"]
+
+
+def test_cost_estimation_retries_parallel_metadata_failure_serially(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    failed_once = False
+
+    def fake_estimate_range(
+        _client: DownloaderClient,
+        symbol: str,
+        schema: str,
+        start: date,
+        end: date,
+    ) -> tuple[str, str, Decimal, int]:
+        nonlocal failed_once
+        _ = (start, end)
+        calls.append((symbol, schema))
+        if not failed_once:
+            failed_once = True
+            raise RetryableError("metadata 503")
+        return (symbol, schema, Decimal("0"), 1)
+
+    monkeypatch.setattr(runner_cost, "_estimate_range", fake_estimate_range)
+    work = [
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
+        WorkItem(symbol="NQ.FUT", schema="mbo", day=date(2026, 4, 1)),
+    ]
+
+    estimates = _estimate_costs(FakeClient(), work, max_workers=2)
+
+    assert [(estimate.symbol, estimate.schema) for estimate in estimates] == [
+        ("ES.FUT", "mbo"),
+        ("NQ.FUT", "mbo"),
+    ]
+    assert len(calls) >= 3
+
+
+def test_estimate_range_adds_bucket_context_to_retryable_errors() -> None:
+    class FailingCostClient(FakeClient):
+        def estimate_cost(self, query: CostQuery) -> Decimal:
+            self.cost_queries.append(query)
+            raise RetryableError("rate limit")
+
+    with pytest.raises(
+        RetryableError,
+        match=r"ES\.FUT/mbo 2026-04-01\.\.2026-04-02 get_cost failed",
+    ):
+        runner_cost._estimate_range(
+            FailingCostClient(),
+            "ES.FUT",
+            "mbo",
+            date(2026, 4, 1),
+            date(2026, 4, 2),
+        )
 
 
 def test_run_download_requires_cost_cap_for_paid_download(tmp_path: Path) -> None:
@@ -893,8 +1105,44 @@ def test_bucket_cost_warn_threshold_uses_cents_internally() -> None:
     assert _bucket_cost_warn_threshold_cents(999) == 249
 
 
-def test_in_flight_planning_exposure_warns_before_streaming(tmp_path: Path) -> None:
-    config = _config(tmp_path).model_copy(update={"max_workers": 3})
+def test_in_flight_planning_exposure_refuses_by_default(tmp_path: Path) -> None:
+    config = _config(tmp_path).model_copy(
+        update={"max_workers": 3, "max_cost_cents": 300}
+    )
+    console = Console(record=True)
+    work = [
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 2)),
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 3)),
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 4)),
+    ]
+    allocation = {
+        work[0]: 50,
+        work[1]: 200,
+        work[2]: 100,
+        work[3]: 25,
+    }
+
+    with pytest.raises(SystemExit) as exc_info:
+        _warn_in_flight_planning_exposure(config, work, allocation, console)
+
+    assert exc_info.value.code == 2
+    output = console.export_text()
+    assert "Refusing download because concurrent burst exposure exceeds" in output
+    assert "largest_concurrent_window=$3.50" in output
+    assert "planning_cap=$3.00" in output
+
+
+def test_in_flight_planning_exposure_warns_when_burst_allowed(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path).model_copy(
+        update={
+            "max_workers": 3,
+            "max_cost_cents": 300,
+            "allow_burst_exposure": True,
+        }
+    )
     console = Console(record=True)
     work = [
         WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
@@ -912,9 +1160,9 @@ def test_in_flight_planning_exposure_warns_before_streaming(tmp_path: Path) -> N
     _warn_in_flight_planning_exposure(config, work, allocation, console)
 
     output = console.export_text()
-    assert "3 concurrent workers" in output
-    assert "up to 3 partitions worth $3.50" in output
-    assert "before the in-flight planning guard can react" in output
+    assert "admission control may run fewer than 3 concurrent workers" in output
+    assert "next 3 partitions total $3.50" in output
+    assert "planning cap $3.00" in output
 
 
 def test_in_flight_planning_exposure_skips_single_worker(tmp_path: Path) -> None:
@@ -1144,12 +1392,15 @@ def test_stream_missing_handles_keyboard_interrupt_cleanly(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    def interrupting_as_completed(
-        _futures: list[object],
+    def interrupting_wait(
+        _futures: set[object],
+        *,
+        return_when: object,
     ) -> NoReturn:
+        _ = return_when
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(runner_stream, "as_completed", interrupting_as_completed)
+    monkeypatch.setattr(runner_stream, "wait", interrupting_wait)
     config = _config(tmp_path)
     work = [WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))]
 
@@ -1192,6 +1443,37 @@ def test_stream_missing_routes_failed_rows_to_error_console(
     assert result.failed == 1
     assert "retryable error: temporary" not in console.export_text()
     assert "retryable error: temporary" in error_console.export_text()
+
+
+def test_stream_missing_defers_panel_rendering_to_live_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    live_renderables: list[object] = []
+
+    class FakeLive:
+        def __init__(self, renderable: object, **_kwargs: object) -> None:
+            live_renderables.append(renderable)
+
+        def start(self) -> None:
+            return
+
+        def stop(self) -> None:
+            return
+
+    def fail_eager_render(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("progress panel should render only on Live refresh")
+
+    monkeypatch.setattr(runner_stream, "Live", FakeLive)
+    monkeypatch.setattr(runner_stream, "_render_progress_panel", fail_eager_render)
+    config = _config(tmp_path)
+    work = [WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))]
+
+    result = _stream_missing(config, FakeClient(), Console(record=True), work)
+
+    assert result.placed == 1
+    assert len(live_renderables) == 1
+    assert hasattr(live_renderables[0], "__rich__")
 
 
 def test_download_result_enforces_accounting_invariant() -> None:
@@ -1323,6 +1605,33 @@ def test_run_download_writes_ledger_and_sha256_sidecar(tmp_path: Path) -> None:
         assert record["directory_fsync_skipped_count"] == 0
 
 
+def test_run_download_records_archive_manifest(tmp_path: Path) -> None:
+    _run_download(_config(tmp_path), FakeClient(), Console(record=True))
+
+    records = [
+        json.loads(line)
+        for line in archive_manifest_path(tmp_path)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert records[-1]["event"] == "databento_downloaded"
+    assert records[-1]["relkey"] == "raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst"
+    assert records[-1]["size_bytes"] > 0
+
+
+def test_manifested_partition_without_file_does_not_skip_databento_download(
+    tmp_path: Path,
+) -> None:
+    item = WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))
+    record_manifest_event(tmp_path, "s3_synced", item, size_bytes=123)
+    client = FakeClient()
+
+    _run_download(_config(tmp_path), client, Console(record=True))
+
+    assert len(client.cost_queries) == 1
+    assert len(client.streamed) == 1
+
+
 def test_run_download_persists_directory_fsync_skipped_count(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1438,6 +1747,73 @@ def test_validate_only_scrubs_cached_files_without_streaming(tmp_path: Path) -> 
     _run_download(config, client, Console(record=True))
 
     assert client.streamed == []
+
+
+def test_validate_only_does_not_materialize_requested_universe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path).model_copy(update={"validate_only": True})
+    client = FakeClient()
+    path = canonical_path(tmp_path, "ES.FUT", "mbo", date(2026, 4, 1))
+    path.parent.mkdir(parents=True)
+    query = StreamQuery(
+        dataset=DATASET,
+        symbol="ES.FUT",
+        schema="mbo",
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 2),
+    )
+    write_empty_dbn_file(query, path)
+
+    def fail_materialized_work(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("validate-only should stream filesystem entries")
+
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "_existing_items",
+        fail_materialized_work,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "_missing_items",
+        fail_materialized_work,
+        raising=False,
+    )
+
+    _run_download(config, client, Console(record=True))
+
+    assert client.streamed == []
+    assert client.cost_queries == []
+
+
+def test_run_download_does_not_materialize_missing_work_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    client = FakeClient()
+
+    def fail_materialized_work(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("download planning should stream work items")
+
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "_existing_items",
+        fail_materialized_work,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "_missing_items",
+        fail_materialized_work,
+        raising=False,
+    )
+
+    _run_download(config, client, Console(record=True))
+
+    assert len(client.streamed) == 1
 
 
 def test_repair_missing_sidecars_for_cached_files(tmp_path: Path) -> None:
@@ -1661,43 +2037,73 @@ def test_stream_missing_cached_race_preserves_accounting(tmp_path: Path) -> None
 def test_stream_missing_enforces_in_flight_planning_guard(tmp_path: Path) -> None:
     config = _config(tmp_path).model_copy(update={"max_cost_cents": 1})
     item = WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1))
+    client = FakeClient()
 
     with pytest.raises(FatalError, match="in-flight planned cost exceeded"):
         _stream_missing(
             config,
-            FakeClient(),
+            client,
             Console(record=True),
             [item],
             estimated_bytes_by_item={item: 1},
             estimated_cost_cents_by_item={item: 2},
         )
+    assert client.streamed == []
 
 
-def test_run_download_enforces_in_flight_planning_guard_across_partitions(
-    monkeypatch: pytest.MonkeyPatch,
+def test_stream_missing_accepts_generator_with_per_key_estimates(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path).model_copy(update={"end": date(2026, 4, 2)})
+    items = [
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 2)),
+    ]
+    key = ("ES.FUT", "mbo")
+
+    result = _stream_missing(
+        config,
+        FakeClient(),
+        Console(record=True),
+        (item for item in items),
+        total_work=len(items),
+        estimated_bytes_by_key={key: 3},
+        estimated_cost_cents_by_key={key: 3},
+        work_counts_by_key={key: len(items)},
+        expected_weekdays_by_key={key: len(items)},
+    )
+
+    assert result.placed == 2
+    assert result.estimated_billable_bytes_landed == 3
+    assert result.estimated_cost_cents_landed == 3
+
+
+def test_stream_missing_enforces_in_flight_planning_guard_across_partitions(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path).model_copy(
         update={"end": date(2026, 4, 2), "max_cost_cents": 1}
     )
-    client = FreeEstimateClient()
-
-    def inflated_allocation(
-        work: list[WorkItem],
-        _estimates: list[CostEstimate],
-    ) -> dict[WorkItem, int]:
-        return dict.fromkeys(work, 1)
-
-    monkeypatch.setattr(
-        runner_lifecycle,
-        "_allocate_estimated_cost_cents",
-        inflated_allocation,
-    )
+    items = [
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 2)),
+    ]
+    key = ("ES.FUT", "mbo")
+    client = FakeClient()
 
     with pytest.raises(FatalError, match="in-flight planned cost exceeded"):
-        _run_download(config, client, Console(record=True))
+        _stream_missing(
+            config,
+            client,
+            Console(record=True),
+            (item for item in items),
+            total_work=len(items),
+            estimated_cost_cents_by_key={key: 2},
+            work_counts_by_key={key: len(items)},
+            expected_weekdays_by_key={key: len(items)},
+        )
 
-    assert len(client.streamed) == 2
+    assert len(client.streamed) == 1
 
 
 def test_existing_items_ignores_unparseable_and_tmp_names(
@@ -1754,6 +2160,17 @@ def test_existing_items_ignores_unparseable_and_tmp_names(
             str(directory / "not-a-date.dbn.zst.dbn.zst"),
         ),
     }
+
+
+def test_existing_items_rejects_symlinked_canonical_entries(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    directory = tmp_path / "raw" / "glbx-mdp3" / "ES.FUT" / "mbo"
+    directory.mkdir(parents=True)
+    escaped = tmp_path / "escaped.dbn.zst"
+    escaped.write_bytes(b"not canonical coverage")
+    (directory / "2026-04-01.dbn.zst").symlink_to(escaped)
+
+    assert _existing_items(config) == set()
 
 
 def test_canonical_dbn_name_regex_is_strict() -> None:

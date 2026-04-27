@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime
 
 import structlog
@@ -13,14 +14,12 @@ import structlog.contextvars
 from rich.console import Console
 
 from databento_stream_downloader._runner.cost import (
-    _allocate_estimated_billable_bytes,
-    _allocate_estimated_cost_cents,
     _check_bucket_cost_caps,
     _check_cost_cap,
     _check_disk_space,
     _estimate_costs,
     _total_estimated_cents,
-    _warn_in_flight_planning_exposure,
+    _warn_in_flight_planning_exposure_for_costs,
 )
 from databento_stream_downloader._runner.format import _print_costs
 from databento_stream_downloader._runner.fsio import (
@@ -35,6 +34,7 @@ from databento_stream_downloader._runner.ledger import (
 from databento_stream_downloader._runner.stream import _stream_missing
 from databento_stream_downloader._runner.types import (
     DownloaderClient,
+    WorkItem,
     _DirectoryFsyncTracker,
 )
 from databento_stream_downloader._runner.validation import (
@@ -43,12 +43,11 @@ from databento_stream_downloader._runner.validation import (
     _validate_cached_metadata_preflight,
 )
 from databento_stream_downloader._runner.work import (
-    _all_items,
-    _cached_items,
-    _existing_items,
-    _sorted_items,
+    WorkKey,
+    _iter_existing_items,
+    _iter_missing_items,
+    _summarize_missing_items,
     _total_partitions,
-    _work_items_from_all,
 )
 from databento_stream_downloader.config import DownloadConfig, RunMode
 from databento_stream_downloader.databento_client import DatabentoClient
@@ -148,12 +147,32 @@ def _run_download_locked(
         strict_validate=config.strict_validate,
     )
     _sweep_stale_tmp_files(config)
-    all_items = _all_items(config)
-    existing_items = _existing_items(config)
-    if config.validate_cached or config.validate_only:
+    if config.validate_only:
         metadata_issues = _validate_cached_metadata_preflight(
             config,
-            existing_items,
+            _iter_existing_items(config),
+            error_console,
+        )
+        if metadata_issues:
+            raise SystemExit(5)
+        if config.write_sidecars:
+            repair_issues = _repair_missing_sidecars(
+                config,
+                _iter_existing_items(config),
+                console,
+                fsync_tracker=fsync_tracker,
+            )
+            if repair_issues:
+                raise SystemExit(5)
+        validation_issues = _validate(config, console, _iter_existing_items(config))
+        if validation_issues:
+            raise SystemExit(5)
+        return
+
+    if config.validate_cached:
+        metadata_issues = _validate_cached_metadata_preflight(
+            config,
+            _iter_existing_items(config),
             error_console,
         )
         if metadata_issues:
@@ -161,33 +180,34 @@ def _run_download_locked(
     if config.write_sidecars:
         repair_issues = _repair_missing_sidecars(
             config,
-            existing_items,
+            _iter_existing_items(config),
             console,
             fsync_tracker=fsync_tracker,
         )
         if repair_issues:
             raise SystemExit(5)
-    if config.validate_only:
-        validation_items = _sorted_items(existing_items)
-        if not validation_items:
-            console.print("No cached partitions found in scope.")
-            return
-        validation_issues = _validate(config, console, validation_items)
-        if validation_issues:
-            raise SystemExit(5)
-        return
-    work = _work_items_from_all(all_items, existing_items)
-    if not work:
+
+    missing_summary = _summarize_missing_items(config)
+    if missing_summary.total == 0:
         console.print("All partitions already cached, nothing to do.")
         LOGGER.info("run_cached", total=_total_partitions(config))
         if config.validate_cached:
-            validation_issues = _validate(config, console, all_items)
+            validation_issues = _validate(
+                config,
+                console,
+                _iter_existing_items(config),
+            )
             if validation_issues:
                 raise SystemExit(5)
         return
 
     try:
-        estimates = _estimate_costs(client, work, max_workers=config.max_workers)
+        estimates = _estimate_costs(
+            client,
+            _iter_missing_items(config),
+            max_workers=config.max_workers,
+            console=console,
+        )
     except RetryableError as exc:
         error_console.print(f"[bold red]Cost estimation failed:[/bold red] {exc}")
         raise SystemExit(1) from exc
@@ -208,13 +228,23 @@ def _run_download_locked(
     if config.mode is RunMode.DRY_RUN:
         return
 
-    estimated_bytes_by_item = _allocate_estimated_billable_bytes(work, estimates)
-    estimated_cost_cents_by_item = _allocate_estimated_cost_cents(work, estimates)
-    _warn_in_flight_planning_exposure(
+    estimated_bytes_by_key = {
+        (estimate.symbol, estimate.schema): estimate.size_bytes
+        for estimate in estimates
+    }
+    estimated_cost_cents_by_key = {
+        (estimate.symbol, estimate.schema): estimate.cost_cents
+        for estimate in estimates
+    }
+    _warn_in_flight_planning_exposure_for_costs(
         config,
-        work,
-        estimated_cost_cents_by_item,
-        error_console,
+        _iter_allocated_values(
+            _iter_missing_items(config),
+            missing_summary.counts_by_key,
+            estimated_cost_cents_by_key,
+        ),
+        total_work=missing_summary.total,
+        console=error_console,
     )
 
     if not config.yes:
@@ -234,15 +264,22 @@ def _run_download_locked(
         config,
         client,
         console,
-        work,
+        _iter_missing_items(config),
+        total_work=missing_summary.total,
         error_console=error_console,
-        estimated_bytes_by_item=estimated_bytes_by_item,
-        estimated_cost_cents_by_item=estimated_cost_cents_by_item,
+        estimated_bytes_by_key=estimated_bytes_by_key,
+        estimated_cost_cents_by_key=estimated_cost_cents_by_key,
+        work_counts_by_key=missing_summary.counts_by_key,
+        expected_weekdays_by_key=missing_summary.expected_weekdays_by_key,
         fsync_tracker=fsync_tracker,
     )
     validation_issues = 0
     if config.validate_cached:
-        validation_issues = _validate(config, console, _cached_items(all_items, work))
+        validation_issues = _validate(
+            config,
+            console,
+            _iter_existing_items(config),
+        )
     elapsed = time.monotonic() - started
     exit_code = _run_exit_code(result, validation_issues)
     _write_run_ledger(
@@ -284,6 +321,21 @@ def _run_download_locked(
         _print_retry_summary(client, console)
     if exit_code:
         raise SystemExit(exit_code)
+
+
+def _iter_allocated_values(
+    work: Iterable[WorkItem],
+    counts_by_key: dict[WorkKey, int],
+    values_by_key: dict[WorkKey, int],
+) -> Iterable[int]:
+    indexes_by_key: dict[WorkKey, int] = {}
+    for item in work:
+        key = (item.symbol, item.schema)
+        count = counts_by_key[key]
+        index = indexes_by_key.get(key, 0)
+        indexes_by_key[key] = index + 1
+        base, remainder = divmod(values_by_key.get(key, 0), count)
+        yield base + (1 if index < remainder else 0)
 
 
 def _run_exit_code(result: DownloadResult, validation_issues: int) -> int:

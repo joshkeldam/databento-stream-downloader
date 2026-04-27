@@ -18,6 +18,7 @@ from rich.console import Console
 
 from databento_stream_downloader.config import (
     DEFAULT_SCHEMAS,
+    MBO_MAX_WORKERS,
     SUPPORTED_SCHEMAS,
     DownloadConfig,
     RunMode,
@@ -142,7 +143,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--workers",
         type=_parse_workers,
         default=4,
-        help="Concurrent download workers. Default 4; max 100.",
+        help=(
+            "Concurrent download workers. Default 4; max 100; mbo requires "
+            f"--workers <= {MBO_MAX_WORKERS} unless explicitly overridden."
+        ),
+    )
+    _ = parser.add_argument(
+        "--allow-high-mbo-workers",
+        action="store_true",
+        help=(
+            f"Allow mbo downloads above {MBO_MAX_WORKERS} workers. This can "
+            "trigger rate limits, stream restarts from byte zero, and materially "
+            "higher billing."
+        ),
     )
     _ = parser.add_argument(
         "--max-cost-cents",
@@ -185,8 +198,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Decode records with DBNStore and check timestamp bounds via "
-            "ts_recv/ts_event, symbology coverage, and ts_recv monotonicity "
-            "when present."
+            "ts_recv/ts_event against the half-open UTC day [start, end), "
+            "symbology coverage, and ts_recv monotonicity when present."
         ),
     )
     _ = parser.add_argument(
@@ -247,6 +260,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Fail when every requested partition for a symbol/schema returns "
             "no data across at least this many expected weekdays."
+        ),
+    )
+    _ = parser.add_argument(
+        "--allow-burst-exposure",
+        action="store_true",
+        help=(
+            "Allow worker admission throttling when the largest concurrent "
+            "planning window exceeds --max-cost-cents; default refuses."
         ),
     )
     _ = parser.add_argument(
@@ -322,7 +343,7 @@ def build_config(
     )
     fsync_writes = cast("bool", getattr(args, "fsync_writes", False)) or paranoid
     return DownloadConfig(
-        data_dir=cast("Path", args.data_dir).absolute(),
+        data_dir=cast("Path", args.data_dir).resolve(strict=False),
         symbols=symbols,
         schemas=tuple(cast("list[str]", args.schemas)),
         start=cast("date", args.start),
@@ -336,6 +357,10 @@ def build_config(
         max_cost_cents=max_cost_cents,
         max_cost_cents_per_bucket=max_cost_cents_per_bucket,
         allow_free_only=allow_free_only,
+        allow_burst_exposure=cast(
+            "bool",
+            getattr(args, "allow_burst_exposure", False),
+        ),
         ledger_rotate_mb=cast("int", getattr(args, "ledger_rotate_mb", 50)),
         suspicious_no_data_weekdays=cast(
             "int",
@@ -349,6 +374,10 @@ def build_config(
         validate_on_write=validate_on_write,
         fsync_writes=fsync_writes,
         show_retries=cast("bool", getattr(args, "show_retries", False)),
+        allow_high_mbo_workers=cast(
+            "bool",
+            getattr(args, "allow_high_mbo_workers", False),
+        ),
         yes=cast("bool", args.yes),
     )
 
@@ -428,7 +457,11 @@ def main() -> None:
         error_console.print(f"[bold red]Fatal:[/bold red] {exc}")
         raise SystemExit(1) from exc
     except Exception as exc:
-        LOGGER.exception("unexpected_cli_failure", error=str(exc))
+        LOGGER.error(
+            "unexpected_cli_failure",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
         error_console.print(f"[bold red]Unexpected failure:[/bold red] {exc}")
         raise SystemExit(4) from exc
 

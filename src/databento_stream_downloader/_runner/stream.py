@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from collections.abc import Iterable, Sized
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from threading import Lock
@@ -40,6 +41,7 @@ from databento_stream_downloader._runner.validation import (
     _raise_on_suspicious_all_no_data,
 )
 from databento_stream_downloader._runner.work import _total_partitions
+from databento_stream_downloader.archive_manifest import record_manifest_event
 from databento_stream_downloader.config import DownloadConfig
 from databento_stream_downloader.constants import DATASET
 from databento_stream_downloader.dbn import validate_dbn_metadata
@@ -57,6 +59,15 @@ from databento_stream_downloader.paths import canonical_path
 
 LOGGER = structlog.get_logger(__name__)
 _IN_FLIGHT_DISPLAY_LIMIT = 8
+_StreamResult = tuple[DownloadOutcome, str]
+WorkKey = tuple[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingWork:
+    item: WorkItem
+    estimated_bytes: int | None
+    estimated_cost_cents: int
 
 
 @dataclass(slots=True)
@@ -80,15 +91,48 @@ class _OutcomeCounts:
             return (self.placed, self.no_data, self.failed)
 
 
+@dataclass(slots=True)
+class _LiveProgressState:
+    active_workers: int = 0
+    _lock: Lock = field(default_factory=Lock)
+
+    def set_active_workers(self, active_workers: int) -> None:
+        with self._lock:
+            self.active_workers = active_workers
+
+    def snapshot_active_workers(self) -> int:
+        with self._lock:
+            return self.active_workers
+
+
+@dataclass(frozen=True, slots=True)
+class _ProgressPanelRenderable:
+    progress: Progress
+    tracker: _InFlightRegistry[WorkItem]
+    counts: _OutcomeCounts
+    max_workers: int
+    state: _LiveProgressState
+
+    def __rich__(self) -> Panel:
+        return _render_progress_panel(
+            self.progress,
+            self.tracker,
+            self.counts,
+            self.max_workers,
+            self.state.snapshot_active_workers(),
+        )
+
+
 def _render_progress_panel(
     progress: Progress,
     tracker: _InFlightRegistry[WorkItem],
     counts: _OutcomeCounts,
     max_workers: int,
+    active_workers: int,
 ) -> Panel:
     placed, no_data, failed = counts.snapshot()
     in_flight = tracker.snapshot()
-    active_count = len(in_flight)
+    in_flight_count = len(in_flight)
 
     activity = Table.grid(padding=(0, 1))
     activity.add_column(no_wrap=True)
@@ -102,7 +146,7 @@ def _render_progress_panel(
                     (item.day.isoformat(), "white"),
                 ),
             )
-        remaining = active_count - _IN_FLIGHT_DISPLAY_LIMIT
+        remaining = in_flight_count - _IN_FLIGHT_DISPLAY_LIMIT
         if remaining > 0:
             activity.add_row(Text(f"… and {remaining} more", style="dim italic"))
     else:
@@ -118,7 +162,7 @@ def _render_progress_panel(
     )
     workers_line = Text.assemble(
         ("Workers ", "dim"),
-        (f"{active_count}", "bold"),
+        (f"{active_workers}", "bold"),
         (f" / {max_workers} active", "dim"),
     )
 
@@ -148,15 +192,27 @@ def _build_progress(quiet: bool, console: Console) -> Progress:
     )
 
 
+def _display_active_workers(
+    total_work: int, completed_work: int, max_workers: int
+) -> int:
+    remaining = max(0, total_work - completed_work)
+    return min(max_workers, remaining)
+
+
 def _stream_missing(
     config: DownloadConfig,
     client: DownloaderClient,
     console: Console,
-    work: list[WorkItem],
+    work: Iterable[WorkItem],
     *,
+    total_work: int | None = None,
     error_console: Console | None = None,
     estimated_bytes_by_item: dict[WorkItem, int] | None = None,
     estimated_cost_cents_by_item: dict[WorkItem, int] | None = None,
+    estimated_bytes_by_key: dict[WorkKey, int] | None = None,
+    estimated_cost_cents_by_key: dict[WorkKey, int] | None = None,
+    work_counts_by_key: dict[WorkKey, int] | None = None,
+    expected_weekdays_by_key: dict[WorkKey, int] | None = None,
     fsync_tracker: _DirectoryFsyncTracker | None = None,
 ) -> DownloadResult:
     placed = 0
@@ -166,30 +222,134 @@ def _stream_missing(
     landed_estimated_cents = 0
     landed_estimated_bytes = 0
     failure_console = error_console or Console(stderr=True)
+    estimated_bytes = estimated_bytes_by_item or {}
+    estimated_costs = estimated_cost_cents_by_item or {}
+    total_work = total_work if total_work is not None else _len_or_none(work)
+    if total_work is None:
+        msg = "streaming work requires total_work for non-sized iterables"
+        raise RuntimeError(msg)
+    work_iter = iter(work)
 
     quiet = bool(getattr(console, "quiet", False))
     progress = _build_progress(quiet, console)
     in_flight_tracker = _InFlightRegistry[WorkItem]()
     counts = _OutcomeCounts()
+    live_state = _LiveProgressState()
 
     pool = ThreadPoolExecutor(max_workers=config.max_workers)
-    futures: list[Future[tuple[DownloadOutcome, str]]] = []
-    future_items: dict[Future[tuple[DownloadOutcome, str]], WorkItem] = {}
-    work_days_by_key: dict[tuple[str, str], set[date]] = {}
-    no_data_days_by_key: dict[tuple[str, str], set[date]] = {}
-    for item in work:
-        key = (item.symbol, item.schema)
-        work_days_by_key.setdefault(key, set()).add(item.day)
+    futures: list[Future[_StreamResult]] = []
+    active_futures: set[Future[_StreamResult]] = set()
+    future_items: dict[Future[_StreamResult], WorkItem] = {}
+    future_costs: dict[Future[_StreamResult], int] = {}
+    future_bytes: dict[Future[_StreamResult], int | None] = {}
+    work_days_by_key: dict[WorkKey, set[date]] = {}
+    no_data_days_by_key: dict[WorkKey, set[date]] = {}
+    no_data_counts_by_key: dict[WorkKey, int] = {}
+    if work_counts_by_key is None or expected_weekdays_by_key is None:
+        if not isinstance(work, Sized):
+            msg = "no-data accounting requires summary maps for non-sized iterables"
+            raise RuntimeError(msg)
+        for item in work:
+            key = (item.symbol, item.schema)
+            work_days_by_key.setdefault(key, set()).add(item.day)
+        work_iter = iter(work)
+    allocation_indexes_by_key: dict[WorkKey, int] = {}
+    pending_work: _PendingWork | None = None
+    work_exhausted = False
+    committed_estimated_cents = 0
+    outstanding_estimated_cents = 0
     fatal = False
     interrupted = False
     live: Live | None = None
+
+    def _planning_cap_error(next_cost_cents: int) -> FatalConfigError:
+        msg = (
+            "in-flight planned cost exceeded planning cap: "
+            f"committed={_money(committed_estimated_cents)}, "
+            f"outstanding={_money(outstanding_estimated_cents)}, "
+            f"next={_money(next_cost_cents)}, "
+            f"planning_cap={_money(config.max_cost_cents or 0)}"
+        )
+        return FatalConfigError(msg)
+
+    def _next_pending_work() -> _PendingWork | None:
+        nonlocal pending_work, work_exhausted
+        if pending_work is not None:
+            return pending_work
+        if work_exhausted:
+            return None
+        try:
+            item = next(work_iter)
+        except StopIteration:
+            work_exhausted = True
+            return None
+        key = (item.symbol, item.schema)
+        item_cost_cents = _allocated_estimate_for_item(
+            item,
+            estimated_costs,
+            estimated_cost_cents_by_key,
+            work_counts_by_key,
+            allocation_indexes_by_key,
+        )
+        item_bytes = _allocated_estimate_for_item(
+            item,
+            estimated_bytes,
+            estimated_bytes_by_key,
+            work_counts_by_key,
+            allocation_indexes_by_key,
+        )
+        pending_work = _PendingWork(item, item_bytes, item_cost_cents)
+        allocation_indexes_by_key[key] = allocation_indexes_by_key.get(key, 0) + 1
+        return pending_work
+
+    def _submit_admissible() -> None:
+        nonlocal fatal, outstanding_estimated_cents, pending_work
+        try:
+            while len(active_futures) < config.max_workers:
+                pending = _next_pending_work()
+                if pending is None:
+                    return
+                item = pending.item
+                item_cost_cents = pending.estimated_cost_cents
+                if (
+                    config.max_cost_cents is not None
+                    and committed_estimated_cents
+                    + outstanding_estimated_cents
+                    + item_cost_cents
+                    > config.max_cost_cents
+                ):
+                    if active_futures:
+                        return
+                    fatal = True
+                    raise _planning_cap_error(item_cost_cents)
+
+                future = pool.submit(
+                    _stream_one,
+                    config,
+                    client,
+                    item,
+                    pending.estimated_bytes,
+                    fsync_tracker,
+                    in_flight_tracker,
+                )
+                futures.append(future)
+                active_futures.add(future)
+                future_items[future] = item
+                future_costs[future] = item_cost_cents
+                future_bytes[future] = pending.estimated_bytes
+                outstanding_estimated_cents += item_cost_cents
+                pending_work = None
+        finally:
+            live_state.set_active_workers(len(active_futures))
+
     if not quiet:
         live = Live(
-            _render_progress_panel(
+            _ProgressPanelRenderable(
                 progress,
                 in_flight_tracker,
                 counts,
                 config.max_workers,
+                live_state,
             ),
             console=console,
             refresh_per_second=8,
@@ -200,89 +360,62 @@ def _stream_missing(
             live.start()
         else:
             progress.start()
-        task = progress.add_task("Downloading", total=len(work))
-        futures = [
-            pool.submit(
-                _stream_one,
-                config,
-                client,
-                item,
-                (estimated_bytes_by_item or {}).get(item),
-                fsync_tracker,
-                in_flight_tracker,
-            )
-            for item in work
-        ]
-        future_items = dict(zip(futures, work, strict=True))
-        for future in as_completed(futures):
-            try:
-                outcome, label = future.result()
-            except FatalError:
-                fatal = True
-                _cancel_futures(futures)
-                pool.shutdown(wait=False, cancel_futures=True)
-                raise
-            except Exception:
-                fatal = True
-                _cancel_futures(futures)
-                pool.shutdown(wait=False, cancel_futures=True)
-                raise
-            item = future_items[future]
-            counts.record(outcome)
-            if outcome == "placed":
-                placed += 1
-            elif outcome == "cached":
-                pass
-            elif outcome == "no_data":
-                no_data += 1
-                key = (item.symbol, item.schema)
-                no_data_days_by_key.setdefault(key, set()).add(item.day)
-                if not progress.console.quiet:
-                    progress.console.print(f"  [yellow]⚠[/yellow] no data {label}")
-            else:
-                failed += 1
-                failure_console.print(f"  [red]✗[/red] {label}")
-            if outcome in ("placed", "no_data"):
-                landed_estimated_bytes += (estimated_bytes_by_item or {}).get(
-                    item,
-                    0,
-                )
-                landed_estimated_cents += (estimated_cost_cents_by_item or {}).get(
-                    item,
-                    0,
-                )
-                if (
-                    config.max_cost_cents is not None
-                    and landed_estimated_cents > config.max_cost_cents
-                ):
+        task = progress.add_task("Downloading", total=total_work)
+        _submit_admissible()
+        while active_futures:
+            done, _pending = wait(active_futures, return_when=FIRST_COMPLETED)
+            for future in done:
+                active_futures.remove(future)
+                live_state.set_active_workers(len(active_futures))
+                item = future_items[future]
+                item_cost_cents = future_costs[future]
+                outstanding_estimated_cents -= item_cost_cents
+                try:
+                    outcome, label = future.result()
+                except FatalError:
                     fatal = True
                     _cancel_futures(futures)
                     pool.shutdown(wait=False, cancel_futures=True)
-                    msg = (
-                        "in-flight planned cost exceeded planning cap: "
-                        f"landed={_money(landed_estimated_cents)}, "
-                        f"planning_cap={_money(config.max_cost_cents)}"
-                    )
-                    raise FatalConfigError(msg)
-            LOGGER.info(
-                "partition_completed",
-                symbol=item.symbol,
-                schema=item.schema,
-                day=item.day.isoformat(),
-                outcome=outcome,
-                label=label,
-            )
-            completed_work += 1
-            progress.advance(task)
-            if live is not None:
-                live.update(
-                    _render_progress_panel(
-                        progress,
-                        in_flight_tracker,
-                        counts,
-                        config.max_workers,
-                    ),
+                    raise
+                except Exception:
+                    fatal = True
+                    _cancel_futures(futures)
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
+                counts.record(outcome)
+                if outcome == "placed":
+                    placed += 1
+                elif outcome == "cached":
+                    pass
+                elif outcome == "no_data":
+                    no_data += 1
+                    key = (item.symbol, item.schema)
+                    no_data_counts_by_key[key] = no_data_counts_by_key.get(key, 0) + 1
+                    if work_counts_by_key is None or expected_weekdays_by_key is None:
+                        no_data_days_by_key.setdefault(key, set()).add(item.day)
+                    if not progress.console.quiet:
+                        progress.console.print(
+                            f"  [yellow]⚠[/yellow] no data {label}"
+                        )
+                else:
+                    failed += 1
+                    failure_console.print(f"  [red]✗[/red] {label}")
+                if outcome != "cached":
+                    committed_estimated_cents += item_cost_cents
+                if outcome in ("placed", "no_data"):
+                    landed_estimated_bytes += future_bytes.get(future) or 0
+                    landed_estimated_cents += item_cost_cents
+                LOGGER.info(
+                    "partition_completed",
+                    symbol=item.symbol,
+                    schema=item.schema,
+                    day=item.day.isoformat(),
+                    outcome=outcome,
+                    label=label,
                 )
+                completed_work += 1
+                progress.advance(task)
+                _submit_admissible()
     except (KeyboardInterrupt, ShutdownRequestedError) as exc:
         interrupted = True
         _cancel_futures(futures)
@@ -300,21 +433,29 @@ def _stream_missing(
         else:
             pool.shutdown(wait=True, cancel_futures=False)
 
-    if completed_work != len(work):
+    if completed_work != total_work:
         if interrupted or fatal:
             raise InterruptedDownloadError("download did not complete")
         msg = (
             f"download work accounting failed: completed={completed_work}, "
-            f"work={len(work)}"
+            f"work={total_work}"
         )
         raise RuntimeError(msg)
 
     cached = _total_partitions(config) - placed - no_data - failed
-    _raise_on_suspicious_all_no_data(
-        work_days_by_key,
-        no_data_days_by_key,
-        threshold_weekdays=config.suspicious_no_data_weekdays,
-    )
+    if work_counts_by_key is not None and expected_weekdays_by_key is not None:
+        _raise_on_suspicious_all_no_data_counts(
+            work_counts_by_key,
+            no_data_counts_by_key,
+            expected_weekdays_by_key,
+            threshold_weekdays=config.suspicious_no_data_weekdays,
+        )
+    else:
+        _raise_on_suspicious_all_no_data(
+            work_days_by_key,
+            no_data_days_by_key,
+            threshold_weekdays=config.suspicious_no_data_weekdays,
+        )
     return DownloadResult(
         total=_total_partitions(config),
         placed=placed,
@@ -324,6 +465,57 @@ def _stream_missing(
         estimated_cost_cents_landed=landed_estimated_cents,
         estimated_billable_bytes_landed=landed_estimated_bytes,
     )
+
+
+def _allocated_estimate_for_item(
+    item: WorkItem,
+    estimated_by_item: dict[WorkItem, int],
+    estimated_by_key: dict[WorkKey, int] | None,
+    work_counts_by_key: dict[WorkKey, int] | None,
+    allocation_indexes_by_key: dict[WorkKey, int],
+) -> int:
+    if estimated_by_key is None:
+        return estimated_by_item.get(item, 0)
+    if work_counts_by_key is None:
+        msg = "per-key estimate allocation requires work counts"
+        raise RuntimeError(msg)
+    key = (item.symbol, item.schema)
+    total = estimated_by_key.get(key, 0)
+    count = work_counts_by_key.get(key)
+    if count is None or count <= 0:
+        msg = f"missing work count for estimate key: {key}"
+        raise RuntimeError(msg)
+    index = allocation_indexes_by_key.get(key, 0)
+    base, remainder = divmod(total, count)
+    return base + (1 if index < remainder else 0)
+
+
+def _raise_on_suspicious_all_no_data_counts(
+    work_counts_by_key: dict[WorkKey, int],
+    no_data_counts_by_key: dict[WorkKey, int],
+    expected_weekdays_by_key: dict[WorkKey, int],
+    *,
+    threshold_weekdays: int,
+) -> None:
+    for (symbol, schema), work_count in work_counts_by_key.items():
+        if no_data_counts_by_key.get((symbol, schema), 0) != work_count:
+            continue
+        expected_weekdays = expected_weekdays_by_key.get((symbol, schema), 0)
+        if expected_weekdays < threshold_weekdays:
+            continue
+        msg = (
+            f"all {work_count} requested partitions returned no data for "
+            f"{symbol}/{schema}, including {expected_weekdays} weekdays on or "
+            "after the configured first UTC data day; check the parent symbol "
+            "before treating these files as canonical coverage"
+        )
+        raise FatalConfigError(msg)
+
+
+def _len_or_none(items: Iterable[WorkItem]) -> int | None:
+    if isinstance(items, Sized):
+        return len(items)
+    return None
 
 
 def _deep_validate_cap(estimated_billable_bytes: int | None) -> int | None:
@@ -357,6 +549,7 @@ def _stream_one(
     token = in_flight.add(item) if in_flight is not None else None
     try:
         try:
+            tmp.unlink(missing_ok=True)
             client.stream_to_file(query, tmp)
             if config.validate_on_write:
                 validate_dbn_metadata(
@@ -380,6 +573,13 @@ def _stream_one(
                     fsync_tracker,
                     fsync_writes=config.fsync_writes,
                 )
+            record_manifest_event(
+                config.data_dir,
+                "databento_downloaded",
+                item,
+                size_bytes=dest.stat().st_size,
+                sha256=digest,
+            )
             return ("placed", label)
         except DegradedError:
             try:
@@ -408,6 +608,13 @@ def _stream_one(
                         fsync_tracker,
                         fsync_writes=config.fsync_writes,
                     )
+                record_manifest_event(
+                    config.data_dir,
+                    "databento_no_data",
+                    item,
+                    size_bytes=dest.stat().st_size,
+                    sha256=digest,
+                )
                 return ("no_data", label)
             except ValidationError as exc:
                 tmp.unlink(missing_ok=True)
@@ -434,6 +641,7 @@ def _stream_one(
 
 __all__ = [
     "_deep_validate_cap",
+    "_display_active_workers",
     "_stream_missing",
     "_stream_one",
 ]

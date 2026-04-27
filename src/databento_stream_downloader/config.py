@@ -15,6 +15,7 @@ DEFAULT_SCHEMAS: tuple[str, ...] = ("definition", "statistics", "status")
 SUPPORTED_SCHEMAS: tuple[str, ...] = (*DEFAULT_SCHEMAS, "mbo")
 _SUPPORTED_SCHEMA_SET = frozenset(SUPPORTED_SCHEMAS)
 _MAX_RANGE_DAYS = 365 * 30
+MBO_MAX_WORKERS = 8
 
 
 class RunMode(StrEnum):
@@ -40,6 +41,7 @@ class DownloadConfig(BaseModel):
     max_cost_cents: int | None = Field(default=None, ge=0)
     max_cost_cents_per_bucket: int | None = Field(default=None, ge=0)
     allow_free_only: bool = False
+    allow_burst_exposure: bool = False
     ledger_rotate_mb: int = Field(default=50, ge=1)
     suspicious_no_data_weekdays: int = Field(default=5, ge=1)
     deep_validate: bool = False
@@ -50,6 +52,7 @@ class DownloadConfig(BaseModel):
     validate_on_write: bool = False
     fsync_writes: bool = False
     show_retries: bool = False
+    allow_high_mbo_workers: bool = False
     yes: bool = False
 
     @property
@@ -103,5 +106,17 @@ class DownloadConfig(BaseModel):
             raise ValueError("schemas must not be empty")
         if self.max_cost_cents == 0 and not self.allow_free_only:
             msg = "max_cost_cents=0 requires allow_free_only=True"
+            raise ValueError(msg)
+        if (
+            "mbo" in self.schemas
+            and self.max_workers > MBO_MAX_WORKERS
+            and not self.allow_high_mbo_workers
+        ):
+            msg = (
+                f"mbo downloads are capped at {MBO_MAX_WORKERS} workers by default; "
+                "lower --workers or pass --allow-high-mbo-workers after confirming "
+                "your Databento account and network can handle the concurrency. "
+                "Failed or retried mbo streams restart from byte zero"
+            )
             raise ValueError(msg)
         return self

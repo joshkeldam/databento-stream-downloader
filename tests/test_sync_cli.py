@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,8 +16,10 @@ from moto import mock_aws
 from databento_stream_downloader import sync_cli
 from databento_stream_downloader._sync import lifecycle as sync_lifecycle
 from databento_stream_downloader._sync.types import SyncConfig, SyncDirection
+from databento_stream_downloader.archive_manifest import archive_manifest_path
 from databento_stream_downloader.config import RunMode
 from databento_stream_downloader.s3_client import S3Client
+from databento_stream_downloader.settings import EnvSettings
 
 _BUCKET = "test-archive"
 _REGION = "us-east-1"
@@ -33,6 +37,31 @@ def _seed_archive(root: Path) -> None:
     base.mkdir(parents=True)
     (base / "2026-04-01.dbn.zst").write_bytes(b"day1-bytes")
     (base / "2026-04-02.dbn.zst").write_bytes(b"day2-bytes-longer")
+
+
+def test_build_sync_config_resolves_symlinked_data_dir(tmp_path: Path) -> None:
+    target = tmp_path / "archive-target"
+    target.mkdir()
+    link = tmp_path / "archive-link"
+    link.symlink_to(target, target_is_directory=True)
+    args = argparse.Namespace(
+        direction="pull",
+        data_dir=link,
+        bucket=_BUCKET,
+        prefix="",
+        region=_REGION,
+        dry_run=False,
+        workers=2,
+        delete=False,
+        verify_sha256=False,
+        planning_mode="size",
+        fsync_writes=False,
+        yes=True,
+    )
+
+    config = sync_cli._build_sync_config(args, EnvSettings())
+
+    assert config.data_dir == target.resolve(strict=False)
 
 
 def test_push_uploads_then_idempotent_rerun_uploads_nothing(
@@ -58,9 +87,19 @@ def test_push_uploads_then_idempotent_rerun_uploads_nothing(
 
     keys = sorted(obj["Key"] for obj in client.list_objects(""))
     assert keys == [
+        "archive-manifest.jsonl",
         "raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst",
         "raw/glbx-mdp3/ES.FUT/mbo/2026-04-02.dbn.zst",
     ]
+    manifest = archive_manifest_path(data)
+    records = [
+        json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
+    ]
+    assert {record["event"] for record in records} == {"s3_synced"}
+    assert {record["relkey"] for record in records} == {
+        "raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst",
+        "raw/glbx-mdp3/ES.FUT/mbo/2026-04-02.dbn.zst",
+    }
 
     # Re-run: nothing to do.
     exit_code = sync_lifecycle.run_sync(config, client=client)
@@ -101,6 +140,11 @@ def test_pull_restores_archive_into_empty_dir(
 
     expected = target / "raw" / "glbx-mdp3" / "ES.FUT" / "mbo" / "2026-04-01.dbn.zst"
     assert expected.read_bytes() == b"day1-bytes"
+    manifest = archive_manifest_path(target)
+    records = [
+        json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
+    ]
+    assert "s3_pulled" in {record["event"] for record in records}
 
 
 def test_round_trip_byte_equal(
@@ -138,8 +182,12 @@ def test_round_trip_byte_equal(
 
     src_files = sorted(p.relative_to(src) for p in src.rglob("*") if p.is_file())
     dest_files = sorted(p.relative_to(dest) for p in dest.rglob("*") if p.is_file())
+    src_files = [p for p in src_files if p.as_posix() != ".run.lock"]
+    dest_files = [p for p in dest_files if p.as_posix() != ".run.lock"]
     assert src_files == dest_files
     for rel in src_files:
+        if rel.as_posix() == "archive-manifest.jsonl":
+            continue
         assert (src / rel).read_bytes() == (dest / rel).read_bytes()
 
 
@@ -234,7 +282,8 @@ def test_main_routes_push_subcommand(
     sync_cli.main()
     client = S3Client(_BUCKET, region=_REGION)
     keys = sorted(obj["Key"] for obj in client.list_objects(""))
-    assert len(keys) == 2
+    assert len(keys) == 3
+    assert "archive-manifest.jsonl" in keys
 
 
 def test_main_rejects_missing_bucket(

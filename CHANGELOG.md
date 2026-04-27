@@ -20,6 +20,10 @@ for repository tags even though it is intended to be cloned and run locally.
   `Metadata.sha256` written during prior pushes. `--delete` is opt-in and
   requires typed `delete` confirmation. `--fsync-writes` (pull only) and
   `--dry-run` mirror the downloader. Wired up as `just s3 push|pull`.
+- New `archive-manifest.jsonl` tracks Databento placements and successful S3
+  push/pull transfers as an audit log. Cache discovery remains
+  filesystem-authoritative: only canonical files present under `data/raw/...`
+  are treated as cached.
 
 ### Changed
 
@@ -60,6 +64,9 @@ for repository tags even though it is intended to be cloned and run locally.
 - Cost-estimation phase concurrency is internally capped at 40 workers (matching
   the empirical Databento metadata-API 429 ceiling) regardless of `--workers`,
   so high streaming concurrency no longer rate-limits the planning phase.
+- Cost estimation still starts with one account-aware `get_cost` request per
+  missing `(symbol, schema)` span, but retry-exhausted spans are now split
+  recursively into smaller `get_cost` requests before failing a single UTC day.
 - The Databento SDK warning suppression that previously serialized every API
   call on a process-global lock is replaced with a module-import-time
   `warnings.filterwarnings()` install. Worker threads now actually run the SDK

@@ -76,7 +76,7 @@ def test_build_config_uses_env_settings_for_cost_cap(tmp_path: Path) -> None:
         start=date(2026, 4, 1),
         end=date(2026, 4, 1),
         dry_run=False,
-        workers=10,
+        workers=8,
         max_cost_cents=None,
         deep_validate=False,
         strict_validate=False,
@@ -93,6 +93,59 @@ def test_build_config_uses_env_settings_for_cost_cap(tmp_path: Path) -> None:
     assert config.symbols == ("ES.FUT",)
     assert config.schemas == ("mbo",)
     assert config.max_cost_cents == 123
+
+
+def test_build_config_allows_burst_exposure_flag(tmp_path: Path) -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args(
+        [
+            "--data-dir",
+            str(tmp_path),
+            "--symbols",
+            "ES.FUT",
+            "--schemas",
+            "mbo",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--max-cost-cents",
+            "1",
+            "--allow-burst-exposure",
+        ]
+    )
+
+    config = cli.build_config(args, EnvSettings(api_key="key"))
+
+    assert config.allow_burst_exposure is True
+
+
+def test_build_config_resolves_symlinked_data_dir(tmp_path: Path) -> None:
+    target = tmp_path / "archive-target"
+    target.mkdir()
+    link = tmp_path / "archive-link"
+    link.symlink_to(target, target_is_directory=True)
+    args = argparse.Namespace(
+        data_dir=link,
+        symbols=["ES.FUT"],
+        schemas=["mbo"],
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 1),
+        dry_run=False,
+        workers=8,
+        max_cost_cents=1,
+        deep_validate=False,
+        strict_validate=False,
+        validate_cached=False,
+        yes=True,
+        log_format="json",
+        log_file=None,
+        verbose=False,
+    )
+
+    config = cli.build_config(args, EnvSettings(api_key="key"))
+
+    assert config.data_dir == target.resolve(strict=False)
 
 
 def test_format_validation_error_is_compact(tmp_path: Path) -> None:

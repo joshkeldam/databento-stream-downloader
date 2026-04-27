@@ -300,6 +300,55 @@ def test_cli_config_validation_rejects_too_many_workers() -> None:
         build_config(args)
 
 
+def test_mbo_downloads_reject_high_workers_without_override() -> None:
+    args = argparse.Namespace(
+        data_dir=Path("data"),
+        symbols=["ES.FUT"],
+        schemas=["mbo"],
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 1),
+        dry_run=False,
+        workers=9,
+        max_cost_cents=1,
+        deep_validate=False,
+        strict_validate=False,
+        validate_cached=False,
+        yes=False,
+        log_format="pretty",
+        log_file=None,
+        verbose=False,
+    )
+
+    with pytest.raises(PydanticValidationError, match="mbo downloads are capped"):
+        build_config(args)
+
+
+def test_mbo_downloads_allow_high_workers_with_explicit_override() -> None:
+    args = argparse.Namespace(
+        data_dir=Path("data"),
+        symbols=["ES.FUT"],
+        schemas=["mbo"],
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 1),
+        dry_run=False,
+        workers=9,
+        max_cost_cents=1,
+        allow_high_mbo_workers=True,
+        deep_validate=False,
+        strict_validate=False,
+        validate_cached=False,
+        yes=False,
+        log_format="pretty",
+        log_file=None,
+        verbose=False,
+    )
+
+    config = build_config(args)
+
+    assert config.max_workers == 9
+    assert config.allow_high_mbo_workers is True
+
+
 def test_cli_default_schemas_exclude_mbo(tmp_path: Path) -> None:
     args = argparse.Namespace(
         data_dir=tmp_path,

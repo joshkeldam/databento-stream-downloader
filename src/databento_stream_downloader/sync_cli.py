@@ -13,7 +13,11 @@ from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
 
 from databento_stream_downloader._sync.lifecycle import run_sync
-from databento_stream_downloader._sync.types import SyncConfig, SyncDirection
+from databento_stream_downloader._sync.types import (
+    PlanningMode,
+    SyncConfig,
+    SyncDirection,
+)
 from databento_stream_downloader.cli import (
     _format_validation_error,
     _installed_signal_handlers,
@@ -95,6 +99,15 @@ def _add_common_args(sp: argparse.ArgumentParser) -> None:
         help="Cross-check the SHA256 sidecar against S3 object metadata.",
     )
     _ = sp.add_argument(
+        "--planning-mode",
+        choices=tuple(mode.value for mode in PlanningMode),
+        default=PlanningMode.SIZE.value,
+        help=(
+            "Plan equality by size only, SHA256 sidecar files, or S3 "
+            "Metadata.sha256. Default size."
+        ),
+    )
+    _ = sp.add_argument(
         "--fsync-writes",
         action="store_true",
         help="Pull only: fsync each placed file and parent dir (default off).",
@@ -139,7 +152,7 @@ def _build_sync_config(
     mode = RunMode.DRY_RUN if cast("bool", args.dry_run) else RunMode.EXECUTE
     return SyncConfig(
         direction=direction,
-        data_dir=cast("Path", args.data_dir).absolute(),
+        data_dir=cast("Path", args.data_dir).resolve(strict=False),
         bucket=bucket,
         prefix=prefix,
         region=region,
@@ -147,6 +160,7 @@ def _build_sync_config(
         max_workers=cast("int", args.workers),
         delete=cast("bool", args.delete),
         verify_sha256=cast("bool", args.verify_sha256),
+        planning_mode=PlanningMode(cast("str", args.planning_mode)),
         fsync_writes=cast("bool", args.fsync_writes),
         yes=cast("bool", args.yes),
     )

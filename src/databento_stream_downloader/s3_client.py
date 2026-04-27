@@ -163,6 +163,31 @@ class S3Client:
         except ClientError as exc:
             _classify_client_error(exc, key)
 
+    def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+        """Read up to ``max_bytes`` from an S3 object."""
+        try:
+            response = cast(
+                "dict[str, Any]",
+                self._client.get_object(
+                    Bucket=self._bucket,
+                    Key=key,
+                    Range=f"bytes=0-{max_bytes - 1}",
+                ),
+            )
+            body = response["Body"]
+            return cast("bytes", body.read(max_bytes))
+        except (
+            EndpointConnectionError,
+            ConnectionClosedError,
+            ReadTimeoutError,
+            ConnectTimeoutError,
+        ) as exc:
+            raise RetryableError(f"S3 get_object transient failure: {exc}") from exc
+        except NoCredentialsError as exc:
+            raise FatalConfigError(f"AWS credentials missing: {exc}") from exc
+        except ClientError as exc:
+            _classify_client_error(exc, key)
+
     def list_objects(self, prefix: str) -> Iterator[dict[str, Any]]:
         """Yield S3 object metadata dicts under the given prefix."""
         try:

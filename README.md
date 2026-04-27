@@ -46,8 +46,9 @@ consistency is checked when cached files are validated through
 ensures sidecars exist and are syntactically/hash consistent enough to avoid
 signing unknown bytes. `--deep-validate` additionally drains the full zstd
 frame. `--strict-validate` performs a DBNStore record pass: it decodes records
-in chunks, verifies `ts_recv` is inside the requested UTC day when available
-and falls back to `ts_event` for schemas without `ts_recv`, checks
+in chunks, verifies `ts_recv` is inside the requested half-open UTC day
+`[start, end)` when available and falls back to `ts_event` for schemas without
+`ts_recv`, checks
 per-instrument `ts_recv` monotonicity where the schema exposes `instrument_id`
 and `ts_recv`, and verifies observed instrument IDs are present in the DBN
 symbology mappings.
@@ -91,10 +92,16 @@ environment variables.
 
 The default worker count is `4`. Increase `--workers` only after observing
 Databento retry/rate-limit logs for your account; the hard CLI maximum is `100`.
-The cost-estimation phase is internally capped at `40` workers regardless of
-`--workers` to avoid 429 rate limits on the metadata API. Use `--show-retries`
-to print the total retry sleeps attempted by the real Databento client at the
-end of the run.
+MBO downloads are capped at `8` workers unless you pass
+`--allow-high-mbo-workers`, because each failed/retried MBO stream restarts from
+byte zero and can materially increase billable attempted bytes.
+The cost-estimation phase follows the Helix downloader model: one account-aware
+`get_cost` request per missing `(symbol, schema)` span, bounded to at most 40
+concurrent metadata requests. If a span exhausts retry attempts, the estimator
+recursively splits only that failing span into smaller `get_cost` requests
+before giving up on a single UTC day. This preserves Databento account discounts
+and free-schema pricing. Use `--show-retries` to print the total retry sleeps
+attempted by the real Databento client at the end of the run.
 
 ## Performance modes
 
@@ -190,7 +197,7 @@ By default, files are written under `./data`, matching:
 data/raw/glbx-mdp3/{symbol}/{schema}/{YYYY-MM-DD}.dbn.zst
 ```
 
-The downloader estimates cost and size for missing contiguous ranges only.
+The downloader estimates cost and size once for each missing symbol/schema span.
 Execute runs require either `--max-cost-cents` or
 `DATABENTO_MAX_COST_CENTS`, even when Databento estimates `$0.00`. This is a
 preflight planning cap on Databento's estimate, not a hard billing cap;
@@ -202,12 +209,13 @@ also tracks landed planned cost for completed partitions as a secondary guard.
 Failed and retried stream attempts can repeat billable work without increasing
 the landed completed-partition total, so actual billing can exceed
 `--max-cost-cents`. Concurrent workers can also have multiple billable
-partitions in flight before the secondary guard can react; before confirmation,
-the runner prints the planned cost of the largest currently possible in-flight
-set. Use `--max-cost-cents-per-bucket` to set a planning cap for any single
-symbol/schema bucket. When a global planning cap is configured, the runner also
-warns if one bucket exceeds 25% of the global planning cap so an accidentally
-expensive line item is visible before execution.
+partitions in flight. Before confirmation, the runner refuses when the largest
+currently possible in-flight set exceeds the planning cap. Pass
+`--allow-burst-exposure` only when you intentionally want admission throttling
+instead of that refusal. Use `--max-cost-cents-per-bucket` to set a planning cap
+for any single symbol/schema bucket. When a global planning cap is configured,
+the runner also warns if one bucket exceeds 25% of the global planning cap so an
+accidentally expensive line item is visible before execution.
 
 Interactive runs ask for confirmation before downloading. Non-interactive runs
 must pass `--yes`; otherwise the command exits before making download requests.
@@ -243,6 +251,11 @@ validation uses the larger of 64 MiB or twice Databento's billable-size estimate
 for the partition. Use `--strict-validate` for record-level structural checks.
 Existing canonical files are treated as cached after sidecar preflight; use
 `--validate-cached` to verify cached file hashes and DBN metadata during a run.
+The downloader also maintains `data/archive-manifest.jsonl`, an append-only
+audit log updated after Databento placements and successful S3 push/pull
+transfers. Cache discovery is filesystem-authoritative: only canonical files
+present under `data/raw/...` are treated as cached. A manifest record alone never
+suppresses a Databento request.
 
 Use `--validate-only` to scrub cached files in the requested scope without a
 Databento API key, cost estimate, or download request. This is the intended
@@ -298,14 +311,14 @@ conservative disk-space heuristic. Actual compressed DBN-on-disk size can differ
 by schema and day.
 
 Cost estimates are summed as decimal dollar values after Databento returns each
-missing contiguous range estimate. Per-row table display is rounded to cents,
+missing symbol/schema span estimate. Per-row table display is rounded to cents,
 but the run-level planning cap is checked after aggregating all Decimal dollar
 estimates and rounding once. The in-flight planning guard is based on the
 planned per-partition estimate allocation; it is not a live billing feed and
 does not include failed or retried stream attempts that never become canonical
-files. It also reacts only after a worker finishes a partition, so with
-`--workers W` up to `W` partitions can be actively streaming before the guard
-observes their planned cost. In-flight landed planned cost is accumulated from
+files. Admission control submits new workers only when committed plus
+outstanding planned cost stays within the cap, unless `--allow-burst-exposure`
+was used. In-flight landed planned cost is accumulated from
 the symbol/schema bucket estimate assigned to completed partitions. Semantic
 no-data partitions still receive planned estimated cost and bytes, and sparse
 missing days are allocated evenly within each symbol/schema estimate bucket.
@@ -331,11 +344,14 @@ repeat billable work for large MBO days. For example, a failed 5 GiB MBO request
 can require another full-day request on retry; the in-flight planning guard is
 based on completed partitions, not attempted bytes or a refund-aware billing
 feed. Actual Databento billing can therefore exceed `--max-cost-cents` on
-failed/retried streams. Retry logs include the operation name and mark stream
-retries as restarting from byte zero so operators can see repeated large-stream
-attempts while the run is active. Ledger v4 records the run exit code, total
-retry counts, retry counts by operation, stream retry count, estimated stream
-attempt count, and terminal outcomes for post-run reconciliation.
+failed/retried streams. Metadata estimation and stream retries use a larger
+MBO-oriented backoff budget than ordinary API requests: six attempts with
+exponential sleeps capped at 60 seconds. Retry logs include the operation name
+and mark stream retries as restarting from byte zero so operators can see
+repeated large-stream attempts while the run is active. Ledger v4 records the
+run exit code, total retry counts, retry counts by operation, stream retry
+count, estimated stream attempt count, and terminal outcomes for post-run
+reconciliation.
 
 Temporary files older than five minutes are removed at run start and logged as
 warnings. The sweep is scoped to the requested symbol/schema directories rather

@@ -227,7 +227,7 @@ def _darwin_mount_entries() -> list[tuple[Path, str]]:
             text=True,
             timeout=2,
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
         return []
     if completed.returncode != 0:
         return []

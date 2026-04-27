@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -16,10 +17,18 @@ from databento_stream_downloader.symbols import load_first_data_utc_dates
 
 LOGGER = structlog.get_logger(__name__)
 _CANONICAL_DBN_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.dbn\.zst$")
+WorkKey = tuple[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class MissingWorkSummary:
+    total: int
+    counts_by_key: dict[WorkKey, int]
+    expected_weekdays_by_key: dict[WorkKey, int]
 
 
 def _work_items_from_all(
-    items: list[WorkItem],
+    items: Iterable[WorkItem],
     existing_items: set[WorkItem],
 ) -> list[WorkItem]:
     return [item for item in items if item not in existing_items]
@@ -30,7 +39,10 @@ def _sorted_items(items: Iterable[WorkItem]) -> list[WorkItem]:
 
 
 def _all_items(config: DownloadConfig) -> list[WorkItem]:
-    items: list[WorkItem] = []
+    return list(_iter_all_items(config))
+
+
+def _iter_all_items(config: DownloadConfig) -> Iterable[WorkItem]:
     first_data_utc = load_first_data_utc_dates()
     for symbol in config.symbols:
         symbol_start = _effective_start(config, symbol, first_data_utc)
@@ -39,18 +51,58 @@ def _all_items(config: DownloadConfig) -> list[WorkItem]:
         for schema in config.schemas:
             day = symbol_start
             while day <= config.end:
-                items.append(WorkItem(symbol=symbol, schema=schema, day=day))
+                yield WorkItem(symbol=symbol, schema=schema, day=day)
                 day += timedelta(days=1)
-    return items
 
 
-def _cached_items(all_items: list[WorkItem], missing: list[WorkItem]) -> list[WorkItem]:
+def _missing_items(
+    config: DownloadConfig,
+    existing_items: set[WorkItem],
+) -> list[WorkItem]:
+    return _work_items_from_all(_iter_all_items(config), existing_items)
+
+
+def _iter_missing_items(config: DownloadConfig) -> Iterable[WorkItem]:
+    root = config.data_dir.resolve(strict=False)
+    for item in _iter_all_items(config):
+        path = config.data_dir / RAW_PREFIX / item.symbol / item.schema / (
+            f"{item.day.isoformat()}.dbn.zst"
+        )
+        if not path.exists() or _unsafe_archive_entry(path, root):
+            yield item
+
+
+def _summarize_missing_items(config: DownloadConfig) -> MissingWorkSummary:
+    total = 0
+    counts_by_key: dict[WorkKey, int] = {}
+    expected_weekdays_by_key: dict[WorkKey, int] = {}
+    for item in _iter_missing_items(config):
+        key = (item.symbol, item.schema)
+        total += 1
+        counts_by_key[key] = counts_by_key.get(key, 0) + 1
+        if item.day.weekday() < 5:
+            expected_weekdays_by_key[key] = expected_weekdays_by_key.get(key, 0) + 1
+    return MissingWorkSummary(
+        total=total,
+        counts_by_key=counts_by_key,
+        expected_weekdays_by_key=expected_weekdays_by_key,
+    )
+
+
+def _cached_items(
+    all_items: Iterable[WorkItem],
+    missing: Iterable[WorkItem],
+) -> list[WorkItem]:
     missing_set = set(missing)
     return [item for item in all_items if item not in missing_set]
 
 
 def _existing_items(config: DownloadConfig) -> set[WorkItem]:
-    items: set[WorkItem] = set()
+    return set(_iter_existing_items(config))
+
+
+def _iter_existing_items(config: DownloadConfig) -> Iterable[WorkItem]:
+    root = config.data_dir.resolve(strict=False)
     first_data_utc = load_first_data_utc_dates()
     end = config.end
     for symbol in config.symbols:
@@ -63,6 +115,9 @@ def _existing_items(config: DownloadConfig) -> set[WorkItem]:
                 continue
             for path in directory.iterdir():
                 _warn_if_suspicious_archive_file(path)
+                if _unsafe_archive_entry(path, root):
+                    LOGGER.warning("unsafe_archive_file_ignored", path=str(path))
+                    continue
                 if _CANONICAL_DBN_NAME_RE.fullmatch(path.name) is None:
                     continue
                 try:
@@ -70,8 +125,11 @@ def _existing_items(config: DownloadConfig) -> set[WorkItem]:
                 except ValueError:
                     continue
                 if start <= day <= end:
-                    items.add(WorkItem(symbol=symbol, schema=schema, day=day))
-    return items
+                    yield WorkItem(symbol=symbol, schema=schema, day=day)
+
+
+def _unsafe_archive_entry(path: Path, root: Path) -> bool:
+    return path.is_symlink() or not path.resolve(strict=False).is_relative_to(root)
 
 
 def _warn_suspicious_archive_files(directory: Path) -> None:
@@ -118,8 +176,14 @@ __all__ = [
     "_cached_items",
     "_effective_start",
     "_existing_items",
+    "_iter_all_items",
+    "_iter_existing_items",
+    "_iter_missing_items",
+    "_missing_items",
     "_sorted_items",
+    "_summarize_missing_items",
     "_total_partitions",
+    "_unsafe_archive_entry",
     "_warn_if_suspicious_archive_file",
     "_warn_suspicious_archive_files",
     "_work_items_from_all",

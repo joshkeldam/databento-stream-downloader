@@ -117,7 +117,11 @@ def validate_dbn_metadata(
         msg = f"DBN metadata mismatch: expected {expected}, got {actual}"
         raise ValidationError(msg)
     if strict:
-        _validate_records(query, path)
+        _validate_records(
+            query,
+            path,
+            max_decompressed_bytes=max_decompressed_bytes,
+        )
 
 
 def _read_metadata(
@@ -193,8 +197,17 @@ def _actual_metadata(metadata: databento_dbn.Metadata) -> MetadataShape:
     )
 
 
-def _validate_records(query: StreamQuery, path: Path) -> None:
+def _validate_records(
+    query: StreamQuery,
+    path: Path,
+    *,
+    max_decompressed_bytes: int | None = None,
+) -> None:
     try:
+        _check_decompressed_byte_budget(
+            path,
+            max_decompressed_bytes=max_decompressed_bytes,
+        )
         store = databento.DBNStore.from_file(path)
         if str(store.metadata.stype_out) != "instrument_id":
             raise ValueError(
@@ -231,9 +244,14 @@ def _validate_records(query: StreamQuery, path: Path) -> None:
                 continue
             first = int(nonzero_timestamps.min())
             last = int(nonzero_timestamps.max())
+            # Databento Historical API ranges are documented as [start, end):
+            # inclusive start, exclusive end, using ts_recv when present and
+            # ts_event otherwise. A record exactly at query.end belongs to the
+            # next UTC partition.
             if first < start_ns or last >= end_ns:
                 raise ValueError(
-                    f"record {timestamp_field} outside requested UTC day bounds: "
+                    f"record {timestamp_field} outside requested UTC day bounds "
+                    "[start, end): "
                     f"min={first}, max={last}, start={start_ns}, end={end_ns}"
                 )
             if instrument_ids is None or timestamp_field != "ts_recv":
@@ -285,6 +303,28 @@ def _validate_records(query: StreamQuery, path: Path) -> None:
         raise ValidationError(msg) from exc
 
 
+def _check_decompressed_byte_budget(
+    path: Path,
+    *,
+    max_decompressed_bytes: int | None,
+) -> None:
+    limit = max_decompressed_bytes or _DEFAULT_MAX_DECOMPRESSED_BYTES
+    consumed = 0
+    with (
+        path.open("rb") as raw_file,
+        zstandard.ZstdDecompressor(
+            max_window_size=_ZSTD_MAX_WINDOW_SIZE
+        ).stream_reader(raw_file) as reader,
+    ):
+        while chunk := reader.read(_CHUNK_SIZE):
+            consumed += len(chunk)
+            if consumed > limit:
+                raise ValueError(
+                    "DBN strict validation exceeded decompressed byte cap: "
+                    f"limit={limit}"
+                )
+
+
 def _record_timestamp_field(names: tuple[str, ...]) -> str | None:
     if "ts_recv" in names:
         return "ts_recv"
@@ -328,7 +368,7 @@ def _mapped_instrument_ids(mappings: object) -> set[int]:
                     ids.add(int(raw_id))
                 else:
                     raise TypeError
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 raise ValidationError(
                     f"non-numeric symbology instrument id: {raw_id!r}"
                 ) from None

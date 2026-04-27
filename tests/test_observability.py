@@ -23,6 +23,14 @@ def test_configure_logging_writes_json_file_when_verbose(tmp_path: Path) -> None
     assert '"value": 1' in text
 
 
+def test_configure_logging_caches_structlog_loggers(tmp_path: Path) -> None:
+    log_file = tmp_path / "logs" / "events.jsonl"
+
+    configure_logging(log_format="json", log_file=log_file, verbose=True, force=True)
+
+    assert structlog.get_config()["cache_logger_on_first_use"] is True
+
+
 def test_configure_logging_keeps_json_file_at_warning_without_verbose(
     tmp_path: Path,
 ) -> None:

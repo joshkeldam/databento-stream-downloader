@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from threading import Lock
-from typing import Any, ClassVar, Literal, cast
+from typing import ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -23,11 +23,19 @@ class SyncDirection(StrEnum):
     PULL = "pull"  # s3 -> local
 
 
+class PlanningMode(StrEnum):
+    """How sync planning decides whether same-size files are equal."""
+
+    SIZE = "size"
+    SIDECAR = "sidecar"
+    HEAD_METADATA = "head-metadata"
+
+
 @dataclass(frozen=True, slots=True)
 class SyncItem:
     """One item to transfer (or delete) during a sync run."""
 
-    local_path: Path
+    local_path: Path | None
     s3_key: str
     size_bytes: int
     op: SyncOp
@@ -85,6 +93,7 @@ class SyncConfig(BaseModel):
     max_workers: int = Field(default=4, ge=1, le=100)
     delete: bool = False
     verify_sha256: bool = False
+    planning_mode: PlanningMode = PlanningMode.SIZE
     fsync_writes: bool = False
     yes: bool = False
 
@@ -107,20 +116,15 @@ class SyncConfig(BaseModel):
             raise ValueError("prefix must not contain '..' segments")
         return cleaned
 
-    @model_validator(mode="before")
-    @classmethod
-    def _drop_fsync_for_push(cls, data: object) -> object:
-        if not isinstance(data, dict):
-            return data
-        payload = cast("dict[str, Any]", data)
-        direction = payload.get("direction")
-        is_push = direction == "push" or direction is SyncDirection.PUSH
-        if is_push and payload.get("fsync_writes"):
-            return {**payload, "fsync_writes": False}
-        return payload
+    @model_validator(mode="after")
+    def _validate_fsync_scope(self) -> Self:
+        if self.direction is SyncDirection.PUSH and self.fsync_writes:
+            raise ValueError("fsync-writes only applies to pull")
+        return self
 
 
 __all__ = [
+    "PlanningMode",
     "SyncConfig",
     "SyncDirection",
     "SyncItem",

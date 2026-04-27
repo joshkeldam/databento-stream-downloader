@@ -36,6 +36,7 @@ def _render_sync_plan_panel(config: SyncConfig, plan: SyncPlan) -> Panel:
         summary.add_row("Region", config.region)
     direction_text = "↑ push (local → s3)" if is_push else "↓ pull (s3 → local)"
     summary.add_row("Direction", direction_text)
+    summary.add_row("Planning", config.planning_mode.value)
 
     counts = Table.grid(padding=(0, 3))
     counts.add_column(style="dim", no_wrap=True)

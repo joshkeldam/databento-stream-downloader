@@ -17,6 +17,7 @@ from databento_stream_downloader._runner.cost import (
     _refuse_ambiguous_zero_cap,
     _total_estimated_cents,
     _warn_in_flight_planning_exposure,
+    _warn_in_flight_planning_exposure_for_costs,
 )
 from databento_stream_downloader._runner.format import _bytes, _money, _print_costs
 from databento_stream_downloader._runner.fsio import (
@@ -97,6 +98,9 @@ from databento_stream_downloader._runner.work import (
     _cached_items,
     _effective_start,
     _existing_items,
+    _iter_all_items,
+    _iter_existing_items,
+    _missing_items,
     _sorted_items,
     _total_partitions,
     _warn_if_suspicious_archive_file,
@@ -139,7 +143,10 @@ __all__ = [
     "_expected_weekdays_after_first_data",
     "_fsync_and_sha256_file",
     "_fsync_directory",
+    "_iter_all_items",
+    "_iter_existing_items",
     "_linux_mount_entries",
+    "_missing_items",
     "_money",
     "_mount_entries",
     "_mount_for_path",
@@ -185,6 +192,7 @@ __all__ = [
     "_validate_sha256_sidecar",
     "_warn_if_suspicious_archive_file",
     "_warn_in_flight_planning_exposure",
+    "_warn_in_flight_planning_exposure_for_costs",
     "_warn_network_filesystem_detection_unavailable",
     "_warn_suspicious_archive_files",
     "_windows_drive_type",
