@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from rich.console import Console
 
 from databento_stream_downloader.config import (
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_SCHEMAS,
     MBO_MAX_WORKERS,
     SUPPORTED_SCHEMAS,
@@ -185,7 +186,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--request-timeout-seconds",
         type=_parse_positive_float,
-        default=100.0,
+        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         help="Best-effort Databento SDK request timeout in seconds.",
     )
     _ = parser.add_argument(
@@ -352,7 +353,7 @@ def build_config(
         max_workers=cast("int", args.workers),
         request_timeout_seconds=cast(
             "float",
-            getattr(args, "request_timeout_seconds", 100.0),
+            getattr(args, "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS),
         ),
         max_cost_cents=max_cost_cents,
         max_cost_cents_per_bucket=max_cost_cents_per_bucket,

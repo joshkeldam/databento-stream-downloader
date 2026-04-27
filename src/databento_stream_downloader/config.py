@@ -16,6 +16,7 @@ SUPPORTED_SCHEMAS: tuple[str, ...] = (*DEFAULT_SCHEMAS, "mbo")
 _SUPPORTED_SCHEMA_SET = frozenset(SUPPORTED_SCHEMAS)
 _MAX_RANGE_DAYS = 365 * 30
 MBO_MAX_WORKERS = 8
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
 
 
 class RunMode(StrEnum):
@@ -37,7 +38,10 @@ class DownloadConfig(BaseModel):
     end: date
     mode: RunMode
     max_workers: int = Field(default=4, ge=1, le=100)
-    request_timeout_seconds: float = Field(default=100.0, gt=0)
+    request_timeout_seconds: float = Field(
+        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        gt=0,
+    )
     max_cost_cents: int | None = Field(default=None, ge=0)
     max_cost_cents_per_bucket: int | None = Field(default=None, ge=0)
     allow_free_only: bool = False

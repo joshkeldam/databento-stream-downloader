@@ -24,6 +24,7 @@ from databento.common.error import (
     BentoWarning,
 )
 
+from databento_stream_downloader.config import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from databento_stream_downloader.dbn import write_empty_dbn_file
 from databento_stream_downloader.errors import (
     DegradedError,
@@ -119,7 +120,7 @@ class DatabentoClient:
         *,
         sleep: Callable[[float], None] = time.sleep,
         jitter: Callable[[float, float], float] = uniform,
-        request_timeout_seconds: float = 100.0,
+        request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         self._api_key = api_key
         self._sleep = sleep

@@ -59,6 +59,8 @@ from databento_stream_downloader.paths import canonical_path
 
 LOGGER = structlog.get_logger(__name__)
 _IN_FLIGHT_DISPLAY_LIMIT = 8
+_LARGE_STREAM_BYTES = 512 * 1024 * 1024
+_MAX_LARGE_STREAMS = 1
 _StreamResult = tuple[DownloadOutcome, str]
 WorkKey = tuple[str, str]
 
@@ -242,6 +244,7 @@ def _stream_missing(
     future_items: dict[Future[_StreamResult], WorkItem] = {}
     future_costs: dict[Future[_StreamResult], int] = {}
     future_bytes: dict[Future[_StreamResult], int | None] = {}
+    future_large_streams: dict[Future[_StreamResult], bool] = {}
     work_days_by_key: dict[WorkKey, set[date]] = {}
     no_data_days_by_key: dict[WorkKey, set[date]] = {}
     no_data_counts_by_key: dict[WorkKey, int] = {}
@@ -258,6 +261,7 @@ def _stream_missing(
     work_exhausted = False
     committed_estimated_cents = 0
     outstanding_estimated_cents = 0
+    active_large_streams = 0
     fatal = False
     interrupted = False
     live: Live | None = None
@@ -303,7 +307,7 @@ def _stream_missing(
         return pending_work
 
     def _submit_admissible() -> None:
-        nonlocal fatal, outstanding_estimated_cents, pending_work
+        nonlocal active_large_streams, fatal, outstanding_estimated_cents, pending_work
         try:
             while len(active_futures) < config.max_workers:
                 pending = _next_pending_work()
@@ -311,6 +315,9 @@ def _stream_missing(
                     return
                 item = pending.item
                 item_cost_cents = pending.estimated_cost_cents
+                is_large_stream = _is_large_stream(pending.estimated_bytes)
+                if is_large_stream and active_large_streams >= _MAX_LARGE_STREAMS:
+                    return
                 if (
                     config.max_cost_cents is not None
                     and committed_estimated_cents
@@ -337,7 +344,10 @@ def _stream_missing(
                 future_items[future] = item
                 future_costs[future] = item_cost_cents
                 future_bytes[future] = pending.estimated_bytes
+                future_large_streams[future] = is_large_stream
                 outstanding_estimated_cents += item_cost_cents
+                if is_large_stream:
+                    active_large_streams += 1
                 pending_work = None
         finally:
             live_state.set_active_workers(len(active_futures))
@@ -366,6 +376,8 @@ def _stream_missing(
             done, _pending = wait(active_futures, return_when=FIRST_COMPLETED)
             for future in done:
                 active_futures.remove(future)
+                if future_large_streams.pop(future, False):
+                    active_large_streams -= 1
                 live_state.set_active_workers(len(active_futures))
                 item = future_items[future]
                 item_cost_cents = future_costs[future]
@@ -488,6 +500,10 @@ def _allocated_estimate_for_item(
     index = allocation_indexes_by_key.get(key, 0)
     base, remainder = divmod(total, count)
     return base + (1 if index < remainder else 0)
+
+
+def _is_large_stream(estimated_bytes: int | None) -> bool:
+    return estimated_bytes is not None and estimated_bytes >= _LARGE_STREAM_BYTES
 
 
 def _raise_on_suspicious_all_no_data_counts(

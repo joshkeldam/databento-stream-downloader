@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -2076,6 +2077,53 @@ def test_stream_missing_accepts_generator_with_per_key_estimates(
     assert result.placed == 2
     assert result.estimated_billable_bytes_landed == 3
     assert result.estimated_cost_cents_landed == 3
+
+
+def test_stream_missing_serializes_large_estimated_streams(tmp_path: Path) -> None:
+    config = _config(tmp_path).model_copy(
+        update={"end": date(2026, 4, 2), "max_workers": 2}
+    )
+    items = [
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 1)),
+        WorkItem(symbol="ES.FUT", schema="mbo", day=date(2026, 4, 2)),
+    ]
+
+    class ConcurrentLargeClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active_streams = 0
+            self.max_active_streams = 0
+            self.lock = threading.Lock()
+
+        def stream_to_file(self, query: StreamQuery, output_path: Path) -> None:
+            with self.lock:
+                self.active_streams += 1
+                self.max_active_streams = max(
+                    self.max_active_streams,
+                    self.active_streams,
+                )
+            try:
+                time.sleep(0.05)
+                super().stream_to_file(query, output_path)
+            finally:
+                with self.lock:
+                    self.active_streams -= 1
+
+    client = ConcurrentLargeClient()
+
+    result = _stream_missing(
+        config,
+        client,
+        Console(record=True),
+        items,
+        estimated_bytes_by_item=dict.fromkeys(
+            items,
+            runner_stream._LARGE_STREAM_BYTES,
+        ),
+    )
+
+    assert result.placed == 2
+    assert client.max_active_streams == 1
 
 
 def test_stream_missing_enforces_in_flight_planning_guard_across_partitions(
