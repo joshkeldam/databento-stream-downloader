@@ -42,7 +42,7 @@ from databento_stream_downloader._runner.validation import (
     _raise_on_suspicious_all_no_data,
 )
 from databento_stream_downloader._runner.work import _total_partitions
-from databento_stream_downloader.config import MBO_MAX_WORKERS, DownloadConfig
+from databento_stream_downloader.config import DownloadConfig
 from databento_stream_downloader.constants import DATASET
 from databento_stream_downloader.dbn import validate_dbn_metadata
 from databento_stream_downloader.errors import (
@@ -59,7 +59,7 @@ from databento_stream_downloader.paths import canonical_path
 
 LOGGER = structlog.get_logger(__name__)
 _LARGE_STREAM_BYTES = 512 * 1024 * 1024
-_MAX_LARGE_STREAMS = MBO_MAX_WORKERS
+_MAX_LARGE_STREAMS = 2
 _StreamResult = tuple[DownloadOutcome, str]
 WorkKey = tuple[str, str]
 

@@ -2148,7 +2148,7 @@ def test_stream_missing_throttles_large_estimated_streams(tmp_path: Path) -> Non
     )
 
     assert result.placed == len(items)
-    assert 1 < client.max_active_streams <= runner_stream._MAX_LARGE_STREAMS
+    assert client.max_active_streams == 2
 
 
 def test_stream_missing_enforces_in_flight_planning_guard_across_partitions(
