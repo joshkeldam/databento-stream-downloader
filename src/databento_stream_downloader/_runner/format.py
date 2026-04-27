@@ -45,7 +45,7 @@ def _render_plan_panel(
     )
     table.add_column("Symbol", style="cyan", no_wrap=True)
     table.add_column("Schema", style="white", no_wrap=True)
-    table.add_column("Size", justify="right", style="white", no_wrap=True)
+    table.add_column("Billable size", justify="right", style="white", no_wrap=True)
     table.add_column("Cost", justify="right", style="white", no_wrap=True)
     for item in ranked:
         table.add_row(
@@ -66,6 +66,7 @@ def _render_plan_panel(
     summary.add_column(style="dim", no_wrap=True)
     summary.add_column(no_wrap=False)
     summary.add_row("Buckets", f"{len(ranked):,}")
+    summary.add_row("Size basis", "uncompressed billable bytes")
     if max_cost_cents is not None:
         summary.add_row("Planning cap", _money(max_cost_cents))
         headroom_cents = max(0, max_cost_cents - total_cents)

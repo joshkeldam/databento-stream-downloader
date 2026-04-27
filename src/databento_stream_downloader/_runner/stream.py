@@ -190,8 +190,10 @@ def _download_progress_label(active: _ActiveDownload) -> str:
     estimated_bytes = active.estimated_bytes
     if estimated_bytes is None or estimated_bytes <= 0:
         return f"{_bytes(downloaded_bytes)} downloaded"
-    percent = downloaded_bytes / estimated_bytes * 100
-    return f"{_bytes(downloaded_bytes)} / {_bytes(estimated_bytes)} ({percent:.1f}%)"
+    return (
+        f"{_bytes(downloaded_bytes)} downloaded; "
+        f"{_bytes(estimated_bytes)} billable est"
+    )
 
 
 def _stat_downloaded_bytes(path: Path) -> int:

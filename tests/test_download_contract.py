@@ -1486,8 +1486,9 @@ def test_download_progress_label_reads_active_tmp_bytes(tmp_path: Path) -> None:
         2048,
     )
 
-    assert runner_stream._download_progress_label(active) == (
-        "1.5 KiB / 2.0 KiB (75.0%)"
+    assert (
+        runner_stream._download_progress_label(active)
+        == "1.5 KiB downloaded; 2.0 KiB billable est"
     )
 
 
@@ -1571,6 +1572,8 @@ def test_cost_table_shows_expensive_rows_first() -> None:
 
     output = console.export_text()
     assert output.index("NQ.FUT") < output.index("CL.FUT") < output.index("ES.FUT")
+    assert "Billable size" in output
+    assert "uncompressed billable bytes" in output
 
 
 def test_config_rejects_invalid_schema_symbol_and_date_order(tmp_path: Path) -> None:
