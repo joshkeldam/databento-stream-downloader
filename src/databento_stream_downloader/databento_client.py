@@ -49,6 +49,8 @@ _HTTP_SERVER_ERROR_MIN = 500
 _MAX_RETRIES = 3
 _MAX_METADATA_RETRIES = 6
 _MAX_STREAM_RETRIES = 6
+_STREAM_PARTIAL_RETRY_CUTOFF_BYTES = 512 * 1024 * 1024
+_STREAM_REQUEST_TIMEOUT_SECONDS = 60 * 60
 _RETRY_BASE_SECONDS = 1.0
 _METADATA_RETRY_BASE_SECONDS = 2.0
 _STREAM_RETRY_BASE_SECONDS = 2.0
@@ -172,6 +174,11 @@ class DatabentoClient:
 
     def stream_to_file(self, query: StreamQuery, output_path: Path) -> None:
         client = self._client()
+        _apply_sdk_api_timeout(
+            client,
+            "timeseries",
+            max(self._request_timeout_seconds, _STREAM_REQUEST_TIMEOUT_SECONDS),
+        )
 
         def _stream() -> object:
             # The Databento SDK opens path= targets with exclusive "x+b" and
@@ -189,7 +196,11 @@ class DatabentoClient:
             )
 
         try:
-            self._with_retry(_stream, operation="stream_to_file")
+            self._with_retry(
+                _stream,
+                operation="stream_to_file",
+                should_retry=lambda _exc: _stream_retry_allowed(output_path),
+            )
         except RetryableError:
             raise
         except (BentoClientError, BentoServerError) as exc:
@@ -218,16 +229,26 @@ class DatabentoClient:
             self._client_state.instance = instance
         return cast("databento.Historical", instance)
 
-    def _with_retry(self, fn: Callable[[], _T], *, operation: str = "request") -> _T:
+    def _with_retry(
+        self,
+        fn: Callable[[], _T],
+        *,
+        operation: str = "request",
+        should_retry: Callable[[BaseException], bool] | None = None,
+    ) -> _T:
         last_exc: BaseException | None = None
         max_attempts, base_seconds, cap_seconds = _retry_policy(operation)
+        attempts_used = 0
+        retry_sleeps = 0
         for attempt in range(max_attempts):
+            attempts_used = attempt + 1
             try:
                 return fn()
             except RetryableError as exc:
                 last_exc = exc
-                if attempt < max_attempts - 1:
+                if _should_retry(exc, attempt, max_attempts, should_retry):
                     self._record_retry(operation)
+                    retry_sleeps += 1
                     self._sleep(
                         _logged_retry_delay(
                             exc,
@@ -239,6 +260,8 @@ class DatabentoClient:
                             cap_seconds=cap_seconds,
                         )
                     )
+                    continue
+                break
             except (BentoClientError, BentoServerError) as exc:
                 last_exc = exc
                 status = int(getattr(exc, "http_status", 0) or 0)
@@ -248,8 +271,9 @@ class DatabentoClient:
                 )
                 if not is_retryable:
                     raise
-                if attempt < max_attempts - 1:
+                if _should_retry(exc, attempt, max_attempts, should_retry):
                     self._record_retry(operation)
+                    retry_sleeps += 1
                     self._sleep(
                         _logged_retry_delay(
                             exc,
@@ -261,6 +285,8 @@ class DatabentoClient:
                             cap_seconds=cap_seconds,
                         )
                     )
+                    continue
+                break
             except BentoError as exc:
                 if not _is_retryable_bento_error(exc):
                     LOGGER.warning(
@@ -270,8 +296,9 @@ class DatabentoClient:
                     )
                     raise
                 last_exc = exc
-                if attempt < max_attempts - 1:
+                if _should_retry(exc, attempt, max_attempts, should_retry):
                     self._record_retry(operation)
+                    retry_sleeps += 1
                     self._sleep(
                         _logged_retry_delay(
                             exc,
@@ -283,14 +310,17 @@ class DatabentoClient:
                             cap_seconds=cap_seconds,
                         )
                     )
+                    continue
+                break
             except OSError as exc:
                 if not _is_retryable_os_error(exc):
                     raise FatalConfigError(
                         f"non-retryable local I/O error: {exc}"
                     ) from exc
                 last_exc = exc
-                if attempt < max_attempts - 1:
+                if _should_retry(exc, attempt, max_attempts, should_retry):
                     self._record_retry(operation)
+                    retry_sleeps += 1
                     self._sleep(
                         _logged_retry_delay(
                             exc,
@@ -302,22 +332,23 @@ class DatabentoClient:
                             cap_seconds=cap_seconds,
                         )
                     )
+                    continue
+                break
         last_detail = ""
         if last_exc is not None:
             last_detail = f"; last_error={type(last_exc).__name__}: {last_exc}"
             LOGGER.warning(
                 "databento_retries_exhausted",
                 operation=operation,
-                retry_sleeps=max_attempts - 1,
-                attempts=max_attempts,
+                retry_sleeps=retry_sleeps,
+                attempts=attempts_used,
                 last_error_type=type(last_exc).__name__,
                 last_error=str(last_exc),
             )
-        attempt_word = "attempt" if max_attempts == 1 else "attempts"
-        retry_sleeps = max_attempts - 1
+        attempt_word = "attempt" if attempts_used == 1 else "attempts"
         sleep_word = "sleep" if retry_sleeps == 1 else "sleeps"
         msg = (
-            f"retry attempts exhausted after {max_attempts} {attempt_word} "
+            f"retry attempts exhausted after {attempts_used} {attempt_word} "
             f"and {retry_sleeps} retry {sleep_word}{last_detail}"
         )
         raise RetryableError(msg) from last_exc
@@ -388,48 +419,87 @@ def _retry_policy(operation: str) -> tuple[int, float, float]:
     return _MAX_RETRIES, _RETRY_BASE_SECONDS, _RETRY_CAP_SECONDS
 
 
+def _should_retry(
+    exc: BaseException,
+    attempt: int,
+    max_attempts: int,
+    should_retry: Callable[[BaseException], bool] | None,
+) -> bool:
+    if attempt >= max_attempts - 1:
+        return False
+    return should_retry is None or should_retry(exc)
+
+
+def _stream_retry_allowed(output_path: Path) -> bool:
+    partial_bytes = _path_size(output_path)
+    if partial_bytes < _STREAM_PARTIAL_RETRY_CUTOFF_BYTES:
+        return True
+    LOGGER.warning(
+        "large_stream_retry_suppressed",
+        path=str(output_path),
+        partial_bytes=partial_bytes,
+        cutoff_bytes=_STREAM_PARTIAL_RETRY_CUTOFF_BYTES,
+    )
+    return False
+
+
+def _path_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 def _apply_sdk_timeout(client: databento.Historical, timeout_seconds: float) -> None:
     for api_name in ("metadata", "timeseries"):
-        api = getattr(client, api_name, None)
-        if api is None or not hasattr(api, "TIMEOUT"):
-            LOGGER.warning(
-                "sdk_timeout_not_applied",
-                api=api_name,
-                timeout_seconds=timeout_seconds,
-            )
-            continue
-        # Databento 0.75 reads TIMEOUT through the API instance. Setting this
-        # instance attribute avoids changing the SDK class default process-wide.
-        api_obj = api
-        api_type = type(cast("object", api))
-        class_timeout_before = getattr(api_type, "TIMEOUT", _MISSING)
-        try:
-            api_obj.TIMEOUT = timeout_seconds
-        except (AttributeError, TypeError) as exc:
-            LOGGER.warning(
-                "sdk_timeout_not_applied",
-                api=api_name,
-                timeout_seconds=timeout_seconds,
-                reason="assignment_failed",
-                error_type=type(exc).__name__,
-            )
-            continue
-        if getattr(api_obj, "TIMEOUT", _MISSING) != timeout_seconds:
-            LOGGER.warning(
-                "sdk_timeout_not_applied",
-                api=api_name,
-                timeout_seconds=timeout_seconds,
-                reason="assignment_not_observed",
-            )
-            continue
-        class_timeout_after = getattr(api_type, "TIMEOUT", _MISSING)
-        if class_timeout_after != class_timeout_before:
-            LOGGER.warning(
-                "sdk_timeout_not_applied",
-                api=api_name,
-                timeout_seconds=timeout_seconds,
-                reason="class_timeout_mutated",
-            )
+        _apply_sdk_api_timeout(client, api_name, timeout_seconds)
+
+
+def _apply_sdk_api_timeout(
+    client: databento.Historical,
+    api_name: str,
+    timeout_seconds: float,
+) -> None:
+    api = getattr(client, api_name, None)
+    if api is None or not hasattr(api, "TIMEOUT"):
+        LOGGER.warning(
+            "sdk_timeout_not_applied",
+            api=api_name,
+            timeout_seconds=timeout_seconds,
+        )
+        return
+    # Databento 0.75 reads TIMEOUT through the API instance. Setting this
+    # instance attribute avoids changing the SDK class default process-wide.
+    api_obj = api
+    api_type = type(cast("object", api))
+    class_timeout_before = getattr(api_type, "TIMEOUT", _MISSING)
+    try:
+        api_obj.TIMEOUT = timeout_seconds
+    except (AttributeError, TypeError) as exc:
+        LOGGER.warning(
+            "sdk_timeout_not_applied",
+            api=api_name,
+            timeout_seconds=timeout_seconds,
+            reason="assignment_failed",
+            error_type=type(exc).__name__,
+        )
+        return
+    if getattr(api_obj, "TIMEOUT", _MISSING) != timeout_seconds:
+        LOGGER.warning(
+            "sdk_timeout_not_applied",
+            api=api_name,
+            timeout_seconds=timeout_seconds,
+            reason="assignment_not_observed",
+        )
+        return
+    class_timeout_after = getattr(api_type, "TIMEOUT", _MISSING)
+    if class_timeout_after != class_timeout_before:
+        LOGGER.warning(
+            "sdk_timeout_not_applied",
+            api=api_name,
+            timeout_seconds=timeout_seconds,
+            reason="class_timeout_mutated",
+        )
 
 
 def _is_semantic_no_data_422(exc: BaseException) -> bool:

@@ -22,6 +22,7 @@ from databento.common.error import (
     BentoWarning,
 )
 
+import databento_stream_downloader.databento_client as databento_client
 from databento_stream_downloader.databento_client import (
     _RETRY_AFTER_CAP_SECONDS,
     DatabentoClient,
@@ -925,6 +926,79 @@ def test_stream_to_file_cleans_output_before_each_retry(
 
     assert output.read_bytes() == b"complete"
     assert attempts == 2
+
+
+def test_stream_to_file_suppresses_retry_after_large_partial(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(databento_client, "_STREAM_PARTIAL_RETRY_CUTOFF_BYTES", 5)
+    client = _client(sleeps=[])
+    output = tmp_path / "out.dbn.zst"
+    attempts = 0
+
+    class Timeseries:
+        def get_range(self, **kwargs: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            Path(str(kwargs["path"])).write_bytes(b"large-partial")
+            raise BentoError("Error streaming response: reset")
+
+    class Historical:
+        timeseries = Timeseries()
+
+    monkeypatch.setattr(client, "_client", lambda: Historical())
+
+    with pytest.raises(RetryableError, match="after 1 attempt"):
+        client.stream_to_file(
+            StreamQuery(
+                dataset="GLBX.MDP3",
+                symbol="ES.FUT",
+                schema="mbo",
+                start=date(2026, 4, 1),
+                end=date(2026, 4, 2),
+            ),
+            output,
+        )
+
+    assert attempts == 1
+    assert output.read_bytes() == b"large-partial"
+    assert client.retry_counts_by_operation == {}
+
+
+def test_stream_to_file_uses_patient_timeseries_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = DatabentoClient("test-key", request_timeout_seconds=12.5)
+
+    class Timeseries:
+        TIMEOUT = 100.0
+
+        def get_range(self, **kwargs: object) -> None:
+            Path(str(kwargs["path"])).write_bytes(b"complete")
+
+    class Historical:
+        timeseries = Timeseries()
+
+    historical = Historical()
+    monkeypatch.setattr(client, "_client", lambda: historical)
+
+    client.stream_to_file(
+        StreamQuery(
+            dataset="GLBX.MDP3",
+            symbol="ES.FUT",
+            schema="mbo",
+            start=date(2026, 4, 1),
+            end=date(2026, 4, 2),
+        ),
+        tmp_path / "out.dbn.zst",
+    )
+
+    assert (
+        historical.timeseries.TIMEOUT
+        == databento_client._STREAM_REQUEST_TIMEOUT_SECONDS
+    )
 
 
 @pytest.mark.parametrize("status", [401, 402, 403])

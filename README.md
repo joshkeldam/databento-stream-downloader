@@ -336,18 +336,18 @@ cancellation handle for an already-running `timeseries.get_range(path=...)`, so
 large MBO files may take time to unwind after a signal.
 
 Streaming downloads are not resumable. If the SDK or network fails mid-file, the
-temporary file is removed and the partition is retried from byte zero. That can
-repeat billable work for large MBO days. For example, a failed 5 GiB MBO request
-can require another full-day request on retry; the in-flight planning guard is
-based on completed partitions, not attempted bytes or a refund-aware billing
-feed. Actual Databento billing can therefore exceed `--max-cost-cents` on
-failed/retried streams. Metadata estimation and stream retries use a larger
-MBO-oriented backoff budget than ordinary API requests: six attempts with
-exponential sleeps capped at 60 seconds. Retry logs include the operation name
-and mark stream retries as restarting from byte zero so operators can see
-repeated large-stream attempts while the run is active. Ledger v4 records the
-run exit code, total retry counts, retry counts by operation, stream retry
-count, estimated stream attempt count, and terminal outcomes for post-run
+partition can only restart from byte zero. Small/early stream failures are
+retried, but once a failed stream has already written a large temporary file the
+runner suppresses further in-process retries for that partition to avoid
+repeated multi-GiB restarts. Actual Databento billing can still exceed
+`--max-cost-cents` on failed/retried streams because the planning cap is based on
+completed partitions, not attempted bytes or a refund-aware billing feed.
+Metadata estimation and stream retries use a larger MBO-oriented backoff budget
+than ordinary API requests: six attempts with exponential sleeps capped at 60
+seconds when retrying remains safe. Retry logs include the operation name and
+mark stream retries as restarting from byte zero. Ledger v4 records the run exit
+code, total retry counts, retry counts by operation, stream retry count,
+estimated stream attempt count, and terminal outcomes for post-run
 reconciliation.
 
 Temporary files older than five minutes are removed at run start and logged as
