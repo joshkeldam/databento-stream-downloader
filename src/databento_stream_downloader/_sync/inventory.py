@@ -202,7 +202,7 @@ def _read_sidecar_digest(sidecar: Path) -> str | None:
     """Best-effort read of `digest  filename\\n` sidecar; None on any error."""
     try:
         digest, _ = sidecar.read_text(encoding="ascii").split(maxsplit=1)
-    except (OSError, UnicodeDecodeError, ValueError):
+    except OSError, UnicodeDecodeError, ValueError:
         return None
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         return None

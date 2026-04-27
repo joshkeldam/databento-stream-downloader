@@ -98,7 +98,7 @@ def test_compute_plan_push_uploads_missing_and_size_mismatched(
     remote = {
         "raw/a.dbn.zst": _RemoteEntry(key="raw/a.dbn.zst", size=100),  # match
         "raw/b.dbn.zst": _RemoteEntry(key="raw/b.dbn.zst", size=999),  # size diff
-        "raw/c.dbn.zst": _RemoteEntry(key="raw/c.dbn.zst", size=50),   # extraneous
+        "raw/c.dbn.zst": _RemoteEntry(key="raw/c.dbn.zst", size=50),  # extraneous
     }
 
     plan = compute_plan(

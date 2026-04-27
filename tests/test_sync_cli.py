@@ -99,9 +99,7 @@ def test_pull_restores_archive_into_empty_dir(
     exit_code = sync_lifecycle.run_sync(pull_config, client=pull_client)
     assert exit_code == 0
 
-    expected = (
-        target / "raw" / "glbx-mdp3" / "ES.FUT" / "mbo" / "2026-04-01.dbn.zst"
-    )
+    expected = target / "raw" / "glbx-mdp3" / "ES.FUT" / "mbo" / "2026-04-01.dbn.zst"
     assert expected.read_bytes() == b"day1-bytes"
 
 

@@ -115,11 +115,7 @@ def _render_sync_panel(
         (f" / {config.max_workers} active", "dim"),
     )
 
-    title = (
-        "Pushing to S3"
-        if is_push
-        else "Pulling from S3"
-    )
+    title = "Pushing to S3" if is_push else "Pulling from S3"
     return Panel(
         Group(progress, Text(""), workers_line, activity, Text(""), counts_line),
         title=f"[bold]{title}[/bold]",
@@ -148,9 +144,9 @@ def _sync_run(
 
     is_push = config.direction is SyncDirection.PUSH
 
-    def _submit_transfer(pool: ThreadPoolExecutor, item: SyncItem) -> Future[
-        tuple[SyncOutcome, str, int]
-    ]:
+    def _submit_transfer(
+        pool: ThreadPoolExecutor, item: SyncItem
+    ) -> Future[tuple[SyncOutcome, str, int]]:
         if is_push:
             return pool.submit(upload_one, client, item, in_flight)
         return pool.submit(
@@ -162,9 +158,9 @@ def _sync_run(
             fsync_writes=config.fsync_writes,
         )
 
-    def _submit_delete(pool: ThreadPoolExecutor, item: SyncItem) -> Future[
-        tuple[SyncOutcome, str, int]
-    ]:
+    def _submit_delete(
+        pool: ThreadPoolExecutor, item: SyncItem
+    ) -> Future[tuple[SyncOutcome, str, int]]:
         return pool.submit(
             delete_one,
             client,

@@ -18,7 +18,12 @@ def main() -> None:
         raise SystemExit("usage: check_coverage_floors.py COVERAGE_JSON")
     report_path = Path(sys.argv[1])
     report = cast("dict[str, Any]", json.loads(report_path.read_text(encoding="utf-8")))
-    files = cast("dict[str, Any]", report.get("files", {}))
+    files = {
+        filename.replace("\\", "/"): file_report
+        for filename, file_report in cast(
+            "dict[str, Any]", report.get("files", {})
+        ).items()
+    }
     failures: list[str] = []
     for filename, floor in _FLOORS.items():
         file_report = cast("dict[str, Any] | None", files.get(filename))

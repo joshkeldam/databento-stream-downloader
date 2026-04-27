@@ -131,10 +131,7 @@ def _build_sync_config(
     direction = SyncDirection(cast("str", args.direction))
     bucket = cast("str | None", args.bucket) or settings.s3_bucket
     if not bucket:
-        msg = (
-            "S3 bucket is not configured: pass --bucket or set "
-            "DATABENTO_S3_BUCKET."
-        )
+        msg = "S3 bucket is not configured: pass --bucket or set DATABENTO_S3_BUCKET."
         raise FatalConfigError(msg)
     prefix_arg = cast("str | None", args.prefix)
     prefix = prefix_arg if prefix_arg is not None else settings.s3_prefix
