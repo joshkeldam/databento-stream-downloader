@@ -60,6 +60,35 @@ def test_upload_then_download_round_trip(
     assert dest.read_bytes() == b"hello world"
 
 
+def test_upload_and_download_callbacks_report_bytes(
+    s3_bucket: None,
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "in" / "file.dbn.zst"
+    src.parent.mkdir()
+    src.write_bytes(b"x" * 1024)
+    upload_chunks: list[int] = []
+    download_chunks: list[int] = []
+
+    client = S3Client(_BUCKET, region=_REGION)
+    client.upload_file(
+        src,
+        "raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst",
+        callback=upload_chunks.append,
+    )
+    dest = tmp_path / "out" / "downloaded.dbn.zst"
+    dest.parent.mkdir()
+    client.download_file(
+        "raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst",
+        dest,
+        callback=download_chunks.append,
+    )
+
+    assert sum(upload_chunks) == 1024
+    assert sum(download_chunks) == 1024
+    assert dest.read_bytes() == src.read_bytes()
+
+
 def test_head_object_returns_none_for_missing_key(
     s3_bucket: None,
 ) -> None:

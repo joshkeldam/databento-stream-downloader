@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import io
 from collections.abc import Iterator
+from concurrent.futures import Future
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn, cast
 
 import boto3
 import pytest
@@ -32,10 +33,13 @@ from databento_stream_downloader._sync.types import (
     SyncConfig,
     SyncDirection,
     SyncItem,
+    SyncOutcome,
+    SyncPlan,
 )
 from databento_stream_downloader.config import RunMode
 from databento_stream_downloader.errors import (
     FatalConfigError,
+    InterruptedDownloadError,
     RetryableError,
 )
 from databento_stream_downloader.s3_client import S3Client
@@ -757,6 +761,83 @@ def test_sync_run_propagates_fatal_error_from_worker(
             console=Console(file=io.StringIO(), force_terminal=False, quiet=True),
             error_console=Console(file=io.StringIO(), force_terminal=False),
         )
+
+
+def test_sync_run_waits_for_active_workers_after_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from databento_stream_downloader._sync import stream as sync_stream
+
+    shutdown_calls: list[tuple[bool, bool]] = []
+
+    class FakePool:
+        def __init__(self, max_workers: int) -> None:
+            self.max_workers = max_workers
+
+        def submit(
+            self,
+            *_args: Any,
+            **_kwargs: Any,
+        ) -> Future[tuple[SyncOutcome, str, int]]:
+            return Future()
+
+        def shutdown(
+            self,
+            *,
+            wait: bool = True,
+            cancel_futures: bool = False,
+        ) -> None:
+            shutdown_calls.append((wait, cancel_futures))
+
+    def interrupting_wait(
+        _futures: set[Future[tuple[SyncOutcome, str, int]]],
+        *,
+        timeout: float | None = None,
+        return_when: object | None = None,
+    ) -> NoReturn:
+        _ = timeout, return_when
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sync_stream, "ThreadPoolExecutor", FakePool)
+    monkeypatch.setattr(sync_stream, "wait", interrupting_wait)
+
+    local_path = tmp_path / "data" / "raw" / "f.dbn.zst"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_bytes(b"x")
+    config = SyncConfig(
+        direction=SyncDirection.PUSH,
+        data_dir=tmp_path / "data",
+        bucket=_BUCKET,
+        region=_REGION,
+        mode=RunMode.EXECUTE,
+        yes=True,
+    )
+    plan = SyncPlan(
+        transfers=(
+            SyncItem(
+                local_path=local_path,
+                s3_key="raw/f.dbn.zst",
+                size_bytes=1,
+                op="transfer",
+            ),
+        ),
+        deletes=(),
+        skipped=0,
+        extraneous=(),
+        total_transfer_bytes=1,
+    )
+
+    with pytest.raises(InterruptedDownloadError):
+        sync_stream._sync_run(
+            config,
+            cast(S3Client, object()),
+            Console(file=io.StringIO(), force_terminal=False, quiet=True),
+            plan,
+            error_console=Console(file=io.StringIO(), force_terminal=False),
+        )
+
+    assert shutdown_calls == [(True, True)]
 
 
 def test_sync_config_rejects_fsync_writes_for_push() -> None:

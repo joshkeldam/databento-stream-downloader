@@ -9,7 +9,7 @@ else falls through to the caller as a fatal API error.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Never, cast
 
@@ -90,6 +90,7 @@ class S3Client:
         key: str,
         *,
         extra_args: dict[str, Any] | None = None,
+        callback: Callable[[int], None] | None = None,
     ) -> None:
         try:
             self._client.upload_file(
@@ -97,6 +98,7 @@ class S3Client:
                 self._bucket,
                 key,
                 ExtraArgs=extra_args or {},
+                Callback=callback,
             )
         except (
             EndpointConnectionError,
@@ -114,9 +116,16 @@ class S3Client:
         self,
         key: str,
         local_path: Path,
+        *,
+        callback: Callable[[int], None] | None = None,
     ) -> None:
         try:
-            self._client.download_file(self._bucket, key, str(local_path))
+            self._client.download_file(
+                self._bucket,
+                key,
+                str(local_path),
+                Callback=callback,
+            )
         except (
             EndpointConnectionError,
             ConnectionClosedError,

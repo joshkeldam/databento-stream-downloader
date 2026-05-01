@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,7 @@ def upload_one(
     client: S3Client,
     item: SyncItem,
     in_flight: _InFlightRegistry[SyncItem] | None,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> tuple[SyncOutcome, str, int]:
     """Upload a single item. Returns (outcome, label, bytes_moved)."""
     label = item.s3_key
@@ -55,7 +57,12 @@ def upload_one(
         if item.sha256 is not None:
             extra["Metadata"] = {"sha256": item.sha256}
         try:
-            client.upload_file(local_path, item.s3_key, extra_args=extra)
+            client.upload_file(
+                local_path,
+                item.s3_key,
+                extra_args=extra,
+                callback=progress_callback,
+            )
         except FatalError:
             raise
         except RetryableError as exc:
@@ -75,6 +82,7 @@ def download_one(
     *,
     verify_sha256: bool,
     fsync_writes: bool,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> tuple[SyncOutcome, str, int]:
     """Download one item then atomic-replace. Returns (outcome, label, bytes)."""
     label = item.s3_key
@@ -84,7 +92,11 @@ def download_one(
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            client.download_file(item.s3_key, tmp)
+            client.download_file(
+                item.s3_key,
+                tmp,
+                callback=progress_callback,
+            )
         except FatalError:
             tmp.unlink(missing_ok=True)
             raise
