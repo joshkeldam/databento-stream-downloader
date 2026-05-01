@@ -65,8 +65,12 @@ def _missing_items(
 def _iter_missing_items(config: DownloadConfig) -> Iterable[WorkItem]:
     root = config.data_dir.resolve(strict=False)
     for item in _iter_all_items(config):
-        path = config.data_dir / RAW_PREFIX / item.symbol / item.schema / (
-            f"{item.day.isoformat()}.dbn.zst"
+        path = (
+            config.data_dir
+            / RAW_PREFIX
+            / item.symbol
+            / item.schema
+            / (f"{item.day.isoformat()}.dbn.zst")
         )
         if not path.exists() or _unsafe_archive_entry(path, root):
             yield item

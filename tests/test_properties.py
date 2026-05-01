@@ -122,8 +122,7 @@ def test_cost_ranges_split_at_missing_day_gaps(offsets: list[int]) -> None:
 
     assert covered_offsets == sorted_offsets
     assert all(
-        right[2] >= left[3] + timedelta(days=1)
-        for left, right in pairwise(ranges)
+        right[2] >= left[3] + timedelta(days=1) for left, right in pairwise(ranges)
     )
 
 

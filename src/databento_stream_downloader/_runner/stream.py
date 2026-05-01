@@ -462,9 +462,7 @@ def _stream_missing(
                     if work_counts_by_key is None or expected_weekdays_by_key is None:
                         no_data_days_by_key.setdefault(key, set()).add(item.day)
                     if not progress.console.quiet:
-                        progress.console.print(
-                            f"  [yellow]⚠[/yellow] no data {label}"
-                        )
+                        progress.console.print(f"  [yellow]⚠[/yellow] no data {label}")
                 else:
                     failed += 1
                     failure_console.print(f"  [red]✗[/red] {label}")

@@ -329,7 +329,7 @@ def _merge_dates_by_group(
 def _read_previous_manifest_scope(path: Path) -> _ExpectedScope | None:
     try:
         raw = cast("dict[str, Any]", json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return None
     groups = raw.get("groups")
     if not isinstance(groups, list):
@@ -390,7 +390,7 @@ def _read_sha256_sidecar(path: Path) -> str | None:
         return _parse_sidecar_digest(
             path.with_suffix(path.suffix + ".sha256").read_text(encoding="ascii"),
         )
-    except (OSError, UnicodeDecodeError):
+    except OSError, UnicodeDecodeError:
         return None
 
 

@@ -312,9 +312,9 @@ def _check_decompressed_byte_budget(
     consumed = 0
     with (
         path.open("rb") as raw_file,
-        zstandard.ZstdDecompressor(
-            max_window_size=_ZSTD_MAX_WINDOW_SIZE
-        ).stream_reader(raw_file) as reader,
+        zstandard.ZstdDecompressor(max_window_size=_ZSTD_MAX_WINDOW_SIZE).stream_reader(
+            raw_file
+        ) as reader,
     ):
         while chunk := reader.read(_CHUNK_SIZE):
             consumed += len(chunk)
@@ -368,7 +368,7 @@ def _mapped_instrument_ids(mappings: object) -> set[int]:
                     ids.add(int(raw_id))
                 else:
                     raise TypeError
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 raise ValidationError(
                     f"non-numeric symbology instrument id: {raw_id!r}"
                 ) from None

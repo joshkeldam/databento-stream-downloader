@@ -545,7 +545,7 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
         return min(max(0.0, float(value)), _RETRY_AFTER_CAP_SECONDS)
     try:
         retry_at = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if retry_at.tzinfo is None:
         return None

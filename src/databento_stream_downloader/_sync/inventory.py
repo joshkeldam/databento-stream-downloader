@@ -299,7 +299,7 @@ def _read_sidecar_digest(sidecar: Path) -> str | None:
     """Best-effort read of `digest  filename\\n` sidecar; None on any error."""
     try:
         return _parse_sidecar_digest(sidecar.read_text(encoding="ascii"))
-    except (OSError, UnicodeDecodeError):
+    except OSError, UnicodeDecodeError:
         return None
 
 
