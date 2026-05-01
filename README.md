@@ -151,6 +151,14 @@ Configuration is taken from `--bucket / --prefix / --region` flags or
 AWS credentials follow the standard boto3 chain (env vars,
 `~/.aws/credentials`, instance profile).
 
+After every completed downloader run, the tool rewrites
+`data/databento-coverage-manifest.json` from the archive filesystem. After
+every S3 sync, it refreshes the same manifest with a fresh S3 inventory; push
+runs also upload the manifest to
+`s3://{bucket}/{prefix}/databento-coverage-manifest.json`. The manifest lists
+local files, S3 files, per-symbol/schema missing dates, local files not yet in
+S3, and S3 files not present locally.
+
 Difference detection is size-based and idempotent: a re-run uploads or
 downloads nothing. `--verify-sha256` additionally cross-checks the local
 `.sha256` sidecar against the `Metadata.sha256` set during the original

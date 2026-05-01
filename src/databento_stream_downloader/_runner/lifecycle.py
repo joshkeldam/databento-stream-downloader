@@ -50,6 +50,9 @@ from databento_stream_downloader._runner.work import (
     _total_partitions,
 )
 from databento_stream_downloader.config import DownloadConfig, RunMode
+from databento_stream_downloader.coverage_manifest import (
+    write_download_coverage_manifest,
+)
 from databento_stream_downloader.databento_client import DatabentoClient
 from databento_stream_downloader.errors import RetryableError
 from databento_stream_downloader.models import DownloadResult
@@ -167,6 +170,7 @@ def _run_download_locked(
         validation_issues = _validate(config, console, _iter_existing_items(config))
         if validation_issues:
             raise SystemExit(5)
+        _write_coverage_manifest(config, run_id)
         return
 
     if config.validate_cached:
@@ -199,6 +203,7 @@ def _run_download_locked(
             )
             if validation_issues:
                 raise SystemExit(5)
+        _write_coverage_manifest(config, run_id)
         return
 
     try:
@@ -282,6 +287,7 @@ def _run_download_locked(
         )
     elapsed = time.monotonic() - started
     exit_code = _run_exit_code(result, validation_issues)
+    _write_coverage_manifest(config, run_id)
     _write_run_ledger(
         config=config,
         run_id=run_id,
@@ -344,6 +350,11 @@ def _run_exit_code(result: DownloadResult, validation_issues: int) -> int:
     if validation_issues:
         return 5
     return 0
+
+
+def _write_coverage_manifest(config: DownloadConfig, run_id: str) -> None:
+    manifest_path = write_download_coverage_manifest(config, run_id=run_id)
+    LOGGER.info("coverage_manifest_updated", path=str(manifest_path))
 
 
 def _utc_now() -> str:

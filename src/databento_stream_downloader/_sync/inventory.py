@@ -16,6 +16,7 @@ from databento_stream_downloader._sync.types import (
     SyncItem,
     SyncPlan,
 )
+from databento_stream_downloader.coverage_manifest import MANIFEST_FILENAME
 
 if TYPE_CHECKING:
     from databento_stream_downloader.s3_client import S3Client
@@ -26,6 +27,7 @@ LOGGER = structlog.get_logger(__name__)
 _SKIP_PATTERNS = (
     re.compile(r"^\.run\.lock$"),
     re.compile(r"^archive-manifest\.jsonl$"),
+    re.compile(rf"^{re.escape(MANIFEST_FILENAME)}$"),
     re.compile(r"^\.[^/]*\.tmp$"),
     re.compile(r"^\.[^/]*\.tmp\..*$"),
     re.compile(r"^\.DS_Store$"),
@@ -137,6 +139,8 @@ def list_remote(
         if list_prefix and not key.startswith(list_prefix):
             continue
         relkey = key[len(list_prefix) :] if list_prefix else key
+        if _should_skip(Path(relkey).name):
+            continue
         _validate_remote_relkey(relkey, data_dir)
         size = int(obj.get("Size", 0) or 0)
         out[relkey] = _RemoteEntry(key=relkey, size=size)

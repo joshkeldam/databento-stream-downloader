@@ -14,6 +14,7 @@ from databento_stream_downloader._sync.format import _print_sync_plan
 from databento_stream_downloader._sync.inventory import (
     compute_plan,
     list_remote,
+    s3_key_for,
     walk_local,
 )
 from databento_stream_downloader._sync.stream import _sync_run
@@ -23,6 +24,10 @@ from databento_stream_downloader._sync.types import (
     SyncDirection,
 )
 from databento_stream_downloader.config import RunMode
+from databento_stream_downloader.coverage_manifest import (
+    MANIFEST_FILENAME,
+    write_sync_coverage_manifest,
+)
 from databento_stream_downloader.s3_client import S3Client
 
 if TYPE_CHECKING:
@@ -64,9 +69,10 @@ def run_sync(
     )
 
     config.data_dir.mkdir(parents=True, exist_ok=True)
+    run_id = str(uuid.uuid4())
     with _exclusive_run_lock(
         config.data_dir,
-        str(uuid.uuid4()),
+        run_id,
         error_console,
         fsync_writes=config.fsync_writes,
     ):
@@ -92,6 +98,15 @@ def run_sync(
 
         if not plan.transfers and not plan.deletes:
             console.print("\n[green]Nothing to do.[/green]")
+            if config.mode is not RunMode.DRY_RUN:
+                _refresh_coverage_manifest(
+                    config,
+                    client,
+                    planning_mode,
+                    run_id=run_id,
+                    console=console,
+                    upload_to_s3=config.direction is SyncDirection.PUSH,
+                )
             return 0
 
         if config.mode is RunMode.DRY_RUN:
@@ -144,6 +159,14 @@ def run_sync(
             deleted=deleted,
             failed=failed,
         )
+        _refresh_coverage_manifest(
+            config,
+            client,
+            planning_mode,
+            run_id=run_id,
+            console=console,
+            upload_to_s3=config.direction is SyncDirection.PUSH and failed == 0,
+        )
         return 1 if failed else 0
 
 
@@ -155,6 +178,36 @@ def _effective_planning_mode(config: SyncConfig) -> PlanningMode:
     ):
         return PlanningMode.HEAD_METADATA
     return config.planning_mode
+
+
+def _refresh_coverage_manifest(
+    config: SyncConfig,
+    client: S3Client,
+    planning_mode: PlanningMode,
+    *,
+    run_id: str,
+    console: Console,
+    upload_to_s3: bool,
+) -> None:
+    remote = list_remote(
+        client,
+        config.prefix,
+        data_dir=config.data_dir,
+        planning_mode=planning_mode,
+    )
+    manifest_path = write_sync_coverage_manifest(
+        data_dir=config.data_dir,
+        remote=remote,
+        bucket=config.bucket,
+        prefix=config.prefix,
+        direction=config.direction.value,
+        run_id=run_id,
+    )
+    if upload_to_s3:
+        manifest_key = s3_key_for(MANIFEST_FILENAME, config.prefix)
+        client.upload_file(manifest_path, manifest_key)
+        console.print(f"[green]Coverage manifest uploaded:[/green] {manifest_key}")
+    LOGGER.info("coverage_manifest_updated", path=str(manifest_path))
 
 
 __all__ = ["_effective_planning_mode", "run_sync"]

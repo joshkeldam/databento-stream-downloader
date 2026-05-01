@@ -16,6 +16,7 @@ from databento_stream_downloader import sync_cli
 from databento_stream_downloader._sync import lifecycle as sync_lifecycle
 from databento_stream_downloader._sync.types import SyncConfig, SyncDirection
 from databento_stream_downloader.config import RunMode
+from databento_stream_downloader.coverage_manifest import MANIFEST_FILENAME
 from databento_stream_downloader.s3_client import S3Client
 from databento_stream_downloader.settings import EnvSettings
 
@@ -85,6 +86,7 @@ def test_push_uploads_then_idempotent_rerun_uploads_nothing(
 
     keys = sorted(obj["Key"] for obj in client.list_objects(""))
     assert keys == [
+        MANIFEST_FILENAME,
         "raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst",
         "raw/glbx-mdp3/ES.FUT/mbo/2026-04-02.dbn.zst",
     ]
@@ -165,8 +167,12 @@ def test_round_trip_byte_equal(
 
     src_files = sorted(p.relative_to(src) for p in src.rglob("*") if p.is_file())
     dest_files = sorted(p.relative_to(dest) for p in dest.rglob("*") if p.is_file())
-    src_files = [p for p in src_files if p.as_posix() != ".run.lock"]
-    dest_files = [p for p in dest_files if p.as_posix() != ".run.lock"]
+    src_files = [
+        p for p in src_files if p.as_posix() not in {".run.lock", MANIFEST_FILENAME}
+    ]
+    dest_files = [
+        p for p in dest_files if p.as_posix() not in {".run.lock", MANIFEST_FILENAME}
+    ]
     assert src_files == dest_files
     for rel in src_files:
         assert (src / rel).read_bytes() == (dest / rel).read_bytes()
@@ -264,6 +270,7 @@ def test_main_routes_push_subcommand(
     client = S3Client(_BUCKET, region=_REGION)
     keys = sorted(obj["Key"] for obj in client.list_objects(""))
     assert keys == [
+        MANIFEST_FILENAME,
         "raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst",
         "raw/glbx-mdp3/ES.FUT/mbo/2026-04-02.dbn.zst",
     ]
@@ -273,7 +280,11 @@ def test_main_rejects_missing_bucket(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    def _skip_dotenv(**_kwargs: object) -> bool:
+        return False
+
     monkeypatch.delenv("DATABENTO_S3_BUCKET", raising=False)
+    monkeypatch.setattr(sync_cli, "load_dotenv", _skip_dotenv)
     monkeypatch.setattr(
         sys,
         "argv",
