@@ -445,12 +445,10 @@ def _stream_missing(
                 except FatalError:
                     fatal = True
                     _cancel_futures(futures)
-                    pool.shutdown(wait=False, cancel_futures=True)
                     raise
                 except Exception:
                     fatal = True
                     _cancel_futures(futures)
-                    pool.shutdown(wait=False, cancel_futures=True)
                     raise
                 counts.record(outcome)
                 if outcome == "placed":
@@ -489,7 +487,6 @@ def _stream_missing(
     except (KeyboardInterrupt, ShutdownRequestedError) as exc:
         interrupted = True
         _cancel_futures(futures)
-        pool.shutdown(wait=False, cancel_futures=True)
         if isinstance(exc, ShutdownRequestedError):
             raise
         raise InterruptedDownloadError("download interrupted by user") from exc
@@ -499,7 +496,9 @@ def _stream_missing(
         else:
             progress.stop()
         if fatal or interrupted:
-            pool.shutdown(wait=False, cancel_futures=True)
+            # Wait on user interrupts before SystemExit unwinds so CPython does
+            # not have to join executor threads during interpreter shutdown.
+            pool.shutdown(wait=interrupted, cancel_futures=True)
         else:
             pool.shutdown(wait=True, cancel_futures=False)
 

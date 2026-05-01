@@ -9,7 +9,7 @@ import signal
 import sys
 from datetime import date
 from pathlib import Path
-from typing import cast
+from typing import Any, NoReturn, cast
 
 import pytest
 import structlog
@@ -585,12 +585,41 @@ def test_high_worker_count_warning_is_visible(
 def test_signal_handler_context_restores_previous_handler() -> None:
     if not hasattr(signal, "SIGTERM"):
         pytest.skip("SIGTERM is not available on this platform")
+    previous_sigint = signal.getsignal(signal.SIGINT)
     previous = signal.getsignal(signal.SIGTERM)
 
     with cli._installed_signal_handlers():
+        assert signal.getsignal(signal.SIGINT) is not previous_sigint
         assert signal.getsignal(signal.SIGTERM) is not previous
 
+    assert signal.getsignal(signal.SIGINT) is previous_sigint
     assert signal.getsignal(signal.SIGTERM) is previous
+
+
+def test_signal_handler_second_sigint_exits_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ImmediateExitError(Exception):
+        pass
+
+    exit_codes: list[int] = []
+
+    def fake_exit(code: int) -> NoReturn:
+        exit_codes.append(code)
+        raise ImmediateExitError
+
+    monkeypatch.setattr(cli.os, "_exit", fake_exit)
+
+    with cli._installed_signal_handlers():
+        handler = signal.getsignal(signal.SIGINT)
+        assert callable(handler)
+        sigint_handler = cast("Any", handler)
+        with pytest.raises(KeyboardInterrupt):
+            sigint_handler(signal.SIGINT, None)
+        with pytest.raises(ImmediateExitError):
+            sigint_handler(signal.SIGINT, None)
+
+    assert exit_codes == [130]
 
 
 def test_main_maps_config_failure_to_exit_2(

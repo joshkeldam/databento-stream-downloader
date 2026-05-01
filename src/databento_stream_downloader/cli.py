@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import os
 import signal
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -469,7 +470,18 @@ def main() -> None:
 
 @contextmanager
 def _installed_signal_handlers() -> Generator[None]:
+    sigint_received = False
+    previous_sigint = signal.getsignal(signal.SIGINT)
     previous_sigterm = None
+
+    def handle_sigint(_signum: int, _frame: object) -> None:
+        nonlocal sigint_received
+        if sigint_received:
+            os._exit(130)
+        sigint_received = True
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, handle_sigint)
     if hasattr(signal, "SIGTERM"):
 
         def handle_sigterm(_signum: int, _frame: object) -> None:
@@ -480,5 +492,6 @@ def _installed_signal_handlers() -> Generator[None]:
     try:
         yield
     finally:
+        signal.signal(signal.SIGINT, previous_sigint)
         if previous_sigterm is not None:
             signal.signal(signal.SIGTERM, previous_sigterm)
