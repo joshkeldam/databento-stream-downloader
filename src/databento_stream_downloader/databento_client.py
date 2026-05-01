@@ -90,6 +90,10 @@ _NO_DATA_422_PATTERNS = (
     re.compile(r"\bno data available\b"),
     re.compile(r"\brequest time range falls entirely inside a weekend\b"),
 )
+_UNRESOLVED_SMART_SYMBOL_422_PATTERNS = (
+    re.compile(r"\bcould not resolve smart symbols?\b"),
+    re.compile(r"\bsymbology_invalid_request\b"),
+)
 _INVALID_422_MARKERS = (
     "invalid",
     "unsupported",
@@ -206,7 +210,9 @@ class DatabentoClient:
         except (BentoClientError, BentoServerError) as exc:
             status = int(getattr(exc, "http_status", 0) or 0)
             if status == _HTTP_UNPROCESSABLE:
-                if _is_semantic_no_data_422(exc):
+                if _is_semantic_no_data_422(exc) or _is_unresolved_smart_symbol_422(
+                    exc,
+                ):
                     raise DegradedError(str(exc)) from exc
                 raise FatalAPIError(f"Databento rejected request: {exc}") from exc
             if status == _HTTP_PAYMENT_REQUIRED:
@@ -509,6 +515,13 @@ def _is_semantic_no_data_422(exc: BaseException) -> bool:
     )
     has_invalid_marker = any(marker in message for marker in _INVALID_422_MARKERS)
     return has_no_data_marker and not has_invalid_marker
+
+
+def _is_unresolved_smart_symbol_422(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(
+        pattern.search(message) for pattern in _UNRESOLVED_SMART_SYMBOL_422_PATTERNS
+    )
 
 
 def _retry_after_seconds(exc: BaseException) -> float | None:

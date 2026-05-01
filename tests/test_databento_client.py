@@ -29,6 +29,7 @@ from databento_stream_downloader.databento_client import (
     _apply_sdk_timeout,
     _is_retryable_os_error,
     _is_semantic_no_data_422,
+    _is_unresolved_smart_symbol_422,
     _raise_classified,
     _retry_after_seconds,
 )
@@ -614,6 +615,21 @@ def test_422_classifier_rejects_invalid_requests(message: str) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "symbology_invalid_request\nCould not resolve smart symbols: RTY.FUT",
+        "Could not resolve smart symbol: RTY.FUT",
+    ],
+)
+def test_422_classifier_accepts_unresolved_smart_symbol_as_degraded(
+    message: str,
+) -> None:
+    assert _is_unresolved_smart_symbol_422(
+        BentoClientError(http_status=422, message=message),
+    )
+
+
 def test_stream_to_file_materializes_only_semantic_no_data_422(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -632,6 +648,38 @@ def test_stream_to_file_materializes_only_semantic_no_data_422(
             raise BentoClientError(
                 http_status=422,
                 message="No records found in the requested time range",
+            )
+
+    class Historical:
+        timeseries = Timeseries()
+
+    monkeypatch.setattr(client, "_client", lambda: Historical())
+
+    with pytest.raises(DegradedError):
+        client.stream_to_file(query, tmp_path / "out.dbn.zst")
+
+
+def test_stream_to_file_materializes_unresolved_smart_symbol_422(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = _client(sleeps=[])
+    query = StreamQuery(
+        dataset="GLBX.MDP3",
+        symbol="RTY.FUT",
+        schema="mbo",
+        start=date(2026, 4, 26),
+        end=date(2026, 4, 27),
+    )
+
+    class Timeseries:
+        def get_range(self, **_kwargs: object) -> None:
+            raise BentoClientError(
+                http_status=422,
+                message=(
+                    "symbology_invalid_request\n"
+                    "Could not resolve smart symbols: RTY.FUT"
+                ),
             )
 
     class Historical:
