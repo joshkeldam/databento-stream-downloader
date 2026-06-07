@@ -5,9 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import os
-import signal
-from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from datetime import date
 from pathlib import Path
 from typing import cast
@@ -17,6 +15,24 @@ from dotenv import load_dotenv
 from pydantic import ValidationError
 from rich.console import Console
 
+from databento_stream_downloader._cli_shared import (
+    format_validation_error as _format_validation_error,
+)
+from databento_stream_downloader._cli_shared import (
+    installed_signal_handlers,
+)
+from databento_stream_downloader._cli_shared import (
+    parse_date as _parse_date,
+)
+from databento_stream_downloader._cli_shared import (
+    parse_nonnegative_int as _parse_nonnegative_int,
+)
+from databento_stream_downloader._cli_shared import (
+    parse_positive_float as _parse_positive_float,
+)
+from databento_stream_downloader._cli_shared import (
+    parse_workers as _parse_workers,
+)
 from databento_stream_downloader.config import (
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_SCHEMAS,
@@ -33,66 +49,27 @@ from databento_stream_downloader.errors import (
     ShutdownRequestedError,
 )
 from databento_stream_downloader.observability import LogFormat, configure_logging
-from databento_stream_downloader.runner import run_download
 from databento_stream_downloader.settings import EnvSettings
 from databento_stream_downloader.symbols import load_default_symbols
 
 LOGGER = structlog.get_logger(__name__)
 
 
-def _parse_date(value: str) -> date:
-    if "T" in value or ":" in value:
-        msg = f"Invalid date format: {value!r}. Expected YYYY-MM-DD, not a timestamp."
-        raise argparse.ArgumentTypeError(msg)
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        msg = f"Invalid date format: {value!r}. Expected YYYY-MM-DD."
-        raise argparse.ArgumentTypeError(msg) from None
+def run_download(
+    config: DownloadConfig,
+    api_key: str,
+    console: Console,
+    error_console: Console | None = None,
+) -> None:
+    from databento_stream_downloader._runner.lifecycle import (
+        run_download as _run_download,
+    )
+
+    _run_download(config, api_key, console, error_console)
 
 
-def _parse_nonnegative_int(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError:
-        msg = f"Invalid integer: {value!r}."
-        raise argparse.ArgumentTypeError(msg) from None
-    if parsed < 0:
-        msg = f"Expected a non-negative integer, got {value!r}."
-        raise argparse.ArgumentTypeError(msg)
-    return parsed
-
-
-def _parse_workers(value: str) -> int:
-    workers = _parse_nonnegative_int(value)
-    if workers < 1 or workers > 100:
-        msg = f"workers must be between 1 and 100, got {workers}."
-        raise argparse.ArgumentTypeError(msg)
-    return workers
-
-
-def _parse_positive_float(value: str) -> float:
-    try:
-        parsed = float(value)
-    except ValueError:
-        msg = f"Invalid float: {value!r}."
-        raise argparse.ArgumentTypeError(msg) from None
-    if parsed <= 0:
-        msg = f"Expected a positive float, got {value!r}."
-        raise argparse.ArgumentTypeError(msg)
-    return parsed
-
-
-def _format_validation_error(exc: ValidationError) -> str:
-    details: list[str] = []
-    for error in exc.errors(include_url=False, include_context=False):
-        location = ".".join(str(part) for part in error["loc"])
-        message = str(error["msg"])
-        if location:
-            details.append(f"{location}: {message}")
-        else:
-            details.append(message)
-    return "\n".join(details)
+def _installed_signal_handlers() -> AbstractContextManager[None]:
+    return installed_signal_handlers(exit_process=os._exit)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -476,32 +453,3 @@ def main() -> None:
         )
         error_console.print(f"[bold red]Unexpected failure:[/bold red] {exc}")
         raise SystemExit(4) from exc
-
-
-@contextmanager
-def _installed_signal_handlers() -> Generator[None]:
-    sigint_received = False
-    previous_sigint = signal.getsignal(signal.SIGINT)
-    previous_sigterm = None
-
-    def handle_sigint(_signum: int, _frame: object) -> None:
-        nonlocal sigint_received
-        if sigint_received:
-            os._exit(130)
-        sigint_received = True
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGINT, handle_sigint)
-    if hasattr(signal, "SIGTERM"):
-
-        def handle_sigterm(_signum: int, _frame: object) -> None:
-            raise ShutdownRequestedError("SIGTERM received")
-
-        previous_sigterm = signal.getsignal(signal.SIGTERM)
-        signal.signal(signal.SIGTERM, handle_sigterm)
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGINT, previous_sigint)
-        if previous_sigterm is not None:
-            signal.signal(signal.SIGTERM, previous_sigterm)

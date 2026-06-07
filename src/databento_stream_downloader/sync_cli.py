@@ -12,16 +12,19 @@ from dotenv import load_dotenv
 from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
 
-from databento_stream_downloader._sync.lifecycle import run_sync
+from databento_stream_downloader._cli_shared import (
+    format_validation_error as _format_validation_error,
+)
+from databento_stream_downloader._cli_shared import (
+    installed_signal_handlers as _installed_signal_handlers,
+)
+from databento_stream_downloader._cli_shared import (
+    parse_workers as _parse_workers,
+)
 from databento_stream_downloader._sync.types import (
     PlanningMode,
     SyncConfig,
     SyncDirection,
-)
-from databento_stream_downloader.cli import (
-    _format_validation_error,
-    _installed_signal_handlers,
-    _parse_workers,
 )
 from databento_stream_downloader.config import RunMode
 from databento_stream_downloader.errors import (
@@ -33,6 +36,17 @@ from databento_stream_downloader.errors import (
 )
 from databento_stream_downloader.observability import LogFormat, configure_logging
 from databento_stream_downloader.settings import EnvSettings
+
+
+def run_sync(
+    config: SyncConfig,
+    *,
+    console: Console | None = None,
+    error_console: Console | None = None,
+) -> int:
+    from databento_stream_downloader._sync.lifecycle import run_sync as _run_sync
+
+    return _run_sync(config, console=console, error_console=error_console)
 
 
 def _build_parser() -> argparse.ArgumentParser:
