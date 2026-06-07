@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -95,27 +97,43 @@ def walk_local(data_dir: Path) -> dict[str, _LocalEntry]:
     out: dict[str, _LocalEntry] = {}
     if not data_dir.is_dir():
         return out
-    for path in sorted(data_dir.rglob("*")):
-        if not path.is_file():
-            continue
+    for path, size in _iter_local_files(data_dir):
         if _should_skip(path.name):
             continue
-        try:
-            size = path.stat().st_size
-        except OSError:
-            LOGGER.warning("local_stat_failed", path=str(path))
-            continue
         key = path.relative_to(data_dir).as_posix()
-        sidecar = path.with_suffix(path.suffix + ".sha256")
-        has_sidecar = sidecar.is_file()
         out[key] = _LocalEntry(
             path=path,
             key=key,
             size=size,
-            sidecar=sidecar if has_sidecar else None,
-            sha256=_read_sidecar_digest(sidecar) if has_sidecar else None,
+            sidecar=None,
+            sha256=None,
         )
+    _attach_local_sidecar_digests(out)
     return out
+
+
+def _iter_local_files(data_dir: Path) -> Iterator[tuple[Path, int]]:
+    stack = [data_dir]
+    while stack:
+        root = stack.pop()
+        try:
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if _should_skip(entry.name):
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        stat_result = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        LOGGER.warning("local_stat_failed", path=entry.path)
+                        continue
+                    yield Path(entry.path), stat_result.st_size
+        except OSError:
+            LOGGER.warning("local_scan_failed", path=str(root))
 
 
 def list_remote(
@@ -156,6 +174,23 @@ def s3_key_for(local_relkey: str, prefix: str) -> str:
     if not prefix:
         return local_relkey
     return f"{prefix}/{local_relkey}"
+
+
+def _attach_local_sidecar_digests(local: dict[str, _LocalEntry]) -> None:
+    for key, entry in tuple(local.items()):
+        if not key.endswith(".sha256"):
+            continue
+        base_key = key.removesuffix(".sha256")
+        base = local.get(base_key)
+        if base is None:
+            continue
+        local[base_key] = _LocalEntry(
+            path=base.path,
+            key=base.key,
+            size=base.size,
+            sidecar=entry.path,
+            sha256=_read_sidecar_digest(entry.path),
+        )
 
 
 def compute_plan(

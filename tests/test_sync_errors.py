@@ -385,6 +385,7 @@ def test_head_object_returns_none_on_404() -> None:
 
 
 def test_run_sync_returns_zero_when_nothing_to_do(
+    monkeypatch: pytest.MonkeyPatch,
     s3_bucket: None,
     tmp_path: Path,
 ) -> None:
@@ -397,6 +398,12 @@ def test_run_sync_returns_zero_when_nothing_to_do(
         yes=True,
     )
     client = S3Client(_BUCKET, region=_REGION)
+
+    def fail_refresh(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("no-op sync must not refresh coverage manifest")
+
+    monkeypatch.setattr(sync_lifecycle, "_refresh_coverage_manifest", fail_refresh)
+
     assert sync_lifecycle.run_sync(config, client=client) == 0
 
 

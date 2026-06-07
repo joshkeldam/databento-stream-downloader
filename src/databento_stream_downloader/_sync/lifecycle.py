@@ -28,7 +28,10 @@ from databento_stream_downloader.coverage_manifest import (
     MANIFEST_FILENAME,
     write_sync_coverage_manifest,
 )
-from databento_stream_downloader.s3_client import S3Client
+from databento_stream_downloader.s3_client import (
+    DEFAULT_S3_MAX_POOL_CONNECTIONS,
+    S3Client,
+)
 
 if TYPE_CHECKING:
     pass
@@ -54,7 +57,14 @@ def run_sync(
     """
     console = console or Console()
     error_console = error_console or Console(stderr=True)
-    client = client or S3Client(bucket=config.bucket, region=config.region)
+    client = client or S3Client(
+        bucket=config.bucket,
+        region=config.region,
+        max_pool_connections=max(
+            DEFAULT_S3_MAX_POOL_CONNECTIONS,
+            config.max_workers,
+        ),
+    )
 
     LOGGER.info(
         "sync_started",
@@ -98,15 +108,6 @@ def run_sync(
 
         if not plan.transfers and not plan.deletes:
             console.print("\n[green]Nothing to do.[/green]")
-            if config.mode is not RunMode.DRY_RUN:
-                _refresh_coverage_manifest(
-                    config,
-                    client,
-                    planning_mode,
-                    run_id=run_id,
-                    console=console,
-                    upload_to_s3=config.direction is SyncDirection.PUSH,
-                )
             return 0
 
         if config.mode is RunMode.DRY_RUN:

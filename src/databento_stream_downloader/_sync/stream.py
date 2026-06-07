@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
+from itertools import chain
 from threading import Lock
 
 import structlog
@@ -272,6 +273,8 @@ def _sync_run(
     futures: list[Future[tuple[SyncOutcome, str, int]]] = []
     active_futures: set[Future[tuple[SyncOutcome, str, int]]] = set()
     future_items: dict[Future[tuple[SyncOutcome, str, int]], SyncItem] = {}
+    work_iter = chain(plan.transfers, plan.deletes)
+    work_exhausted = False
     fatal = False
     interrupted = False
     task = progress.add_task(
@@ -293,22 +296,34 @@ def _sync_run(
             refresh_per_second=8,
             transient=False,
         )
+
+    def _submit_item(pool: ThreadPoolExecutor, item: SyncItem) -> None:
+        future = (
+            _submit_delete(pool, item)
+            if item.op == "delete"
+            else _submit_transfer(pool, item)
+        )
+        futures.append(future)
+        active_futures.add(future)
+        future_items[future] = item
+
+    def _submit_until_full(pool: ThreadPoolExecutor) -> None:
+        nonlocal work_exhausted
+        while len(active_futures) < config.max_workers and not work_exhausted:
+            try:
+                item = next(work_iter)
+            except StopIteration:
+                work_exhausted = True
+                return
+            _submit_item(pool, item)
+
     try:
         if live is not None:
             live.start()
         else:
             progress.start()
 
-        for item in plan.transfers:
-            future = _submit_transfer(pool, item)
-            futures.append(future)
-            active_futures.add(future)
-            future_items[future] = item
-        for item in plan.deletes:
-            future = _submit_delete(pool, item)
-            futures.append(future)
-            active_futures.add(future)
-            future_items[future] = item
+        _submit_until_full(pool)
 
         while active_futures:
             _sync_progress_bar(progress, task, progress_by_key, progress_lock)
@@ -358,6 +373,7 @@ def _sync_run(
                     label=label,
                     bytes=bytes_moved,
                 )
+                _submit_until_full(pool)
     except (KeyboardInterrupt, ShutdownRequestedError) as exc:
         interrupted = True
         _cancel_futures(futures)
