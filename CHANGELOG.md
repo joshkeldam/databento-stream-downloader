@@ -9,6 +9,9 @@ for repository tags even though it is intended to be cloned and run locally.
 
 ### Added
 
+- `mbp-10` (market-by-price, 10 levels) is now a supported, opt-in billable
+  schema alongside `mbo`. It downloads, validates, and S3-syncs through the same
+  canonical `raw/glbx-mdp3/{symbol}/mbp-10/{date}.dbn.zst` layout.
 - Ledger v4 records now include `exit_code`, `interrupted`, stream retry counts,
   estimated stream attempts, and terminal outcomes for post-run forensics.
 - New `databento-stream-sync` console script (with `push` and `pull`
@@ -27,6 +30,10 @@ for repository tags even though it is intended to be cloned and run locally.
 
 ### Changed
 
+- The 8-worker concurrency cap now applies to all high-volume book schemas
+  (`mbo` and `mbp-10`), not just `mbo`. The override flag is renamed to
+  `--allow-high-volume-workers`; `--allow-high-mbo-workers` is kept as a
+  deprecated alias.
 - Runner internals are split into lifecycle, filesystem, cost, streaming,
   validation, ledger, work-discovery, formatting, and shared-type modules while
   preserving the public `databento_stream_downloader.runner` import path.
@@ -40,8 +47,15 @@ for repository tags even though it is intended to be cloned and run locally.
   console in both quiet and non-quiet runs.
 - Dependabot now runs monthly for Python and GitHub Actions dependencies to
   match the repository's exact-pin, clone-and-run dependency policy.
-- The temporary pip audit suppression now documents its advisory rationale and
-  review trigger in both local and CI quality gates.
+- All dependencies refreshed to their latest versions compatible with Python
+  3.14, including the source-authority-critical `databento` (0.75.0 → 0.79.0)
+  and `databento-dbn` (0.53.0 → 0.59.0) market-data SDKs, plus `boto3`/`botocore`
+  1.43.23, `pydantic-settings` 2.14.1, `numpy` 2.4.6, `moto` 5.2.1, `ruff`
+  0.15.16, `basedpyright` 1.39.6, and the `hatchling` build backend 1.30.1.
+- Removed the temporary `GHSA-58qw-9mgm-455v` (CVE-2026-3219) pip-audit
+  suppression from the local and CI quality gates; the advisory is resolved in
+  the bundled pip (26.1.2), so the audit and SBOM steps no longer pass
+  `--ignore-vuln`.
 - Test coverage gates now require 92% global coverage plus explicit per-file
   floors for `cli.py` and `databento_client.py`.
 - Property tests now cover cost allocation invariants, cost-range gap handling,

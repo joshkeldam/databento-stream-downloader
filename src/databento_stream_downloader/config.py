@@ -12,10 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from databento_stream_downloader.validators import PARENT_SYMBOL_RE
 
 DEFAULT_SCHEMAS: tuple[str, ...] = ("definition", "statistics", "status")
-SUPPORTED_SCHEMAS: tuple[str, ...] = (*DEFAULT_SCHEMAS, "mbo")
+SUPPORTED_SCHEMAS: tuple[str, ...] = (*DEFAULT_SCHEMAS, "mbo", "mbp-10")
 _SUPPORTED_SCHEMA_SET = frozenset(SUPPORTED_SCHEMAS)
+# High-volume book schemas whose streams are large and restart from byte zero on
+# any retry, so concurrency is capped unless explicitly overridden.
+HIGH_VOLUME_SCHEMAS: frozenset[str] = frozenset({"mbo", "mbp-10"})
 _MAX_RANGE_DAYS = 365 * 30
-MBO_MAX_WORKERS = 8
+HIGH_VOLUME_MAX_WORKERS = 8
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
 
 
@@ -56,7 +59,7 @@ class DownloadConfig(BaseModel):
     validate_on_write: bool = False
     fsync_writes: bool = False
     show_retries: bool = False
-    allow_high_mbo_workers: bool = False
+    allow_high_volume_workers: bool = False
     yes: bool = False
 
     @property
@@ -112,15 +115,16 @@ class DownloadConfig(BaseModel):
             msg = "max_cost_cents=0 requires allow_free_only=True"
             raise ValueError(msg)
         if (
-            "mbo" in self.schemas
-            and self.max_workers > MBO_MAX_WORKERS
-            and not self.allow_high_mbo_workers
+            any(schema in HIGH_VOLUME_SCHEMAS for schema in self.schemas)
+            and self.max_workers > HIGH_VOLUME_MAX_WORKERS
+            and not self.allow_high_volume_workers
         ):
             msg = (
-                f"mbo downloads are capped at {MBO_MAX_WORKERS} workers by default; "
-                "lower --workers or pass --allow-high-mbo-workers after confirming "
-                "your Databento account and network can handle the concurrency. "
-                "Failed or retried mbo streams restart from byte zero"
+                "high-volume schemas (mbo, mbp-10) are capped at "
+                f"{HIGH_VOLUME_MAX_WORKERS} workers by default; lower --workers or "
+                "pass --allow-high-volume-workers after confirming your Databento "
+                "account and network can handle the concurrency. Failed or retried "
+                "streams restart from byte zero"
             )
             raise ValueError(msg)
         return self

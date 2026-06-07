@@ -20,7 +20,7 @@ from rich.console import Console
 from databento_stream_downloader.config import (
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_SCHEMAS,
-    MBO_MAX_WORKERS,
+    HIGH_VOLUME_MAX_WORKERS,
     SUPPORTED_SCHEMAS,
     DownloadConfig,
     RunMode,
@@ -119,8 +119,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=list(DEFAULT_SCHEMAS),
         metavar="SCHEMA",
         help=(
-            "Schemas to download. Defaults to free metadata schemas; mbo is "
-            "billable and opt-in."
+            "Schemas to download. Defaults to free metadata schemas; the mbo and "
+            "mbp-10 book schemas are billable and opt-in."
         ),
     )
     _ = parser.add_argument(
@@ -146,18 +146,28 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_parse_workers,
         default=4,
         help=(
-            "Concurrent download workers. Default 4; max 100; mbo requires "
-            f"--workers <= {MBO_MAX_WORKERS} unless explicitly overridden."
+            "Concurrent download workers. Default 4; max 100; mbo/mbp-10 require "
+            f"--workers <= {HIGH_VOLUME_MAX_WORKERS} unless explicitly overridden."
         ),
     )
     _ = parser.add_argument(
-        "--allow-high-mbo-workers",
+        "--allow-high-volume-workers",
+        dest="allow_high_volume_workers",
         action="store_true",
         help=(
-            f"Allow mbo downloads above {MBO_MAX_WORKERS} workers. This can "
-            "trigger rate limits, stream restarts from byte zero, and materially "
-            "higher billing."
+            "Allow high-volume schema downloads (mbo, mbp-10) above "
+            f"{HIGH_VOLUME_MAX_WORKERS} workers. This can trigger rate limits, "
+            "stream restarts from byte zero, and materially higher billing."
         ),
+    )
+    _ = parser.add_argument(
+        # Deprecated alias retained for backwards compatibility; --workers caps
+        # now cover all high-volume schemas, not just mbo.
+        "--allow-high-mbo-workers",
+        dest="allow_high_volume_workers",
+        action="store_true",
+        deprecated=True,
+        help=argparse.SUPPRESS,
     )
     _ = parser.add_argument(
         "--max-cost-cents",
@@ -376,9 +386,9 @@ def build_config(
         validate_on_write=validate_on_write,
         fsync_writes=fsync_writes,
         show_retries=cast("bool", getattr(args, "show_retries", False)),
-        allow_high_mbo_workers=cast(
+        allow_high_volume_workers=cast(
             "bool",
-            getattr(args, "allow_high_mbo_workers", False),
+            getattr(args, "allow_high_volume_workers", False),
         ),
         yes=cast("bool", args.yes),
     )

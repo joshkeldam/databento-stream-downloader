@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling==1.28.0"]
+requires = ["hatchling==1.30.1"]
 build-backend = "hatchling.build"
 
 [project]
@@ -20,13 +20,13 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "boto3==1.42.96",
-  "botocore==1.42.96",
-  "databento==0.75.0",
-  "databento-dbn==0.53.0",
-  "numpy==2.4.4",
-  "pydantic==2.13.3",
-  "pydantic-settings==2.12.0",
+  "boto3==1.43.23",
+  "botocore==1.43.23",
+  "databento==0.79.0",
+  "databento-dbn==0.59.0",
+  "numpy==2.4.6",
+  "pydantic==2.13.4",
+  "pydantic-settings==2.14.1",
   "python-dotenv==1.2.2",
   "rich==15.0.0",
   "structlog==25.5.0",
@@ -46,15 +46,15 @@ Changelog = "https://github.com/joshkeldam/databento-stream-downloader/blob/main
 
 [dependency-groups]
 dev = [
-  "basedpyright==1.39.3",
-  "boto3-stubs[s3]==1.42.96",
-  "hypothesis==6.148.2",
-  "moto[s3]==5.1.22",
-  "pip-audit==2.9.0",
-  "pre-commit==4.5.0",
+  "basedpyright==1.39.6",
+  "boto3-stubs[s3]==1.43.23",
+  "hypothesis==6.155.1",
+  "moto[s3]==5.2.1",
+  "pip-audit==2.10.0",
+  "pre-commit==4.6.0",
   "pytest==9.0.3",
-  "pytest-cov==7.0.0",
-  "ruff==0.15.12",
+  "pytest-cov==7.1.0",
+  "ruff==0.15.16",
 ]
 
 [tool.hatch.build.targets.wheel]

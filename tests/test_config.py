@@ -300,11 +300,14 @@ def test_cli_config_validation_rejects_too_many_workers() -> None:
         build_config(args)
 
 
-def test_mbo_downloads_reject_high_workers_without_override() -> None:
+@pytest.mark.parametrize("schema", ["mbo", "mbp-10"])
+def test_high_volume_downloads_reject_high_workers_without_override(
+    schema: str,
+) -> None:
     args = argparse.Namespace(
         data_dir=Path("data"),
         symbols=["ES.FUT"],
-        schemas=["mbo"],
+        schemas=[schema],
         start=date(2026, 4, 1),
         end=date(2026, 4, 1),
         dry_run=False,
@@ -319,21 +322,24 @@ def test_mbo_downloads_reject_high_workers_without_override() -> None:
         verbose=False,
     )
 
-    with pytest.raises(PydanticValidationError, match="mbo downloads are capped"):
+    with pytest.raises(PydanticValidationError, match="capped at 8 workers"):
         build_config(args)
 
 
-def test_mbo_downloads_allow_high_workers_with_explicit_override() -> None:
+@pytest.mark.parametrize("schema", ["mbo", "mbp-10"])
+def test_high_volume_downloads_allow_high_workers_with_explicit_override(
+    schema: str,
+) -> None:
     args = argparse.Namespace(
         data_dir=Path("data"),
         symbols=["ES.FUT"],
-        schemas=["mbo"],
+        schemas=[schema],
         start=date(2026, 4, 1),
         end=date(2026, 4, 1),
         dry_run=False,
         workers=9,
         max_cost_cents=1,
-        allow_high_mbo_workers=True,
+        allow_high_volume_workers=True,
         deep_validate=False,
         strict_validate=False,
         validate_cached=False,
@@ -346,7 +352,20 @@ def test_mbo_downloads_allow_high_workers_with_explicit_override() -> None:
     config = build_config(args)
 
     assert config.max_workers == 9
-    assert config.allow_high_mbo_workers is True
+    assert config.allow_high_volume_workers is True
+
+
+def test_mbp10_is_a_supported_schema() -> None:
+    config = DownloadConfig(
+        data_dir=Path("data"),
+        symbols=("ES.FUT",),
+        schemas=("mbp-10",),
+        start=date(2026, 4, 1),
+        end=date(2026, 4, 1),
+        mode=RunMode.DRY_RUN,
+    )
+
+    assert config.schemas == ("mbp-10",)
 
 
 def test_cli_default_schemas_exclude_mbo(tmp_path: Path) -> None:

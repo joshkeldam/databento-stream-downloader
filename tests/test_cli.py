@@ -120,6 +120,90 @@ def test_build_config_allows_burst_exposure_flag(tmp_path: Path) -> None:
     assert config.allow_burst_exposure is True
 
 
+def test_build_config_accepts_mbp10_schema(tmp_path: Path) -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args(
+        [
+            "--data-dir",
+            str(tmp_path),
+            "--symbols",
+            "ES.FUT",
+            "--schemas",
+            "mbp-10",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--max-cost-cents",
+            "1",
+        ]
+    )
+
+    config = cli.build_config(args, EnvSettings(api_key="key"))
+
+    assert config.schemas == ("mbp-10",)
+
+
+def test_allow_high_volume_workers_flag_sets_config(tmp_path: Path) -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args(
+        [
+            "--data-dir",
+            str(tmp_path),
+            "--symbols",
+            "ES.FUT",
+            "--schemas",
+            "mbp-10",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--max-cost-cents",
+            "1",
+            "--workers",
+            "9",
+            "--allow-high-volume-workers",
+        ]
+    )
+
+    config = cli.build_config(args, EnvSettings(api_key="key"))
+
+    assert config.max_workers == 9
+    assert config.allow_high_volume_workers is True
+
+
+def test_deprecated_allow_high_mbo_workers_alias_still_works(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args(
+        [
+            "--data-dir",
+            str(tmp_path),
+            "--symbols",
+            "ES.FUT",
+            "--schemas",
+            "mbo",
+            "--start",
+            "2026-04-01",
+            "--end",
+            "2026-04-01",
+            "--max-cost-cents",
+            "1",
+            "--workers",
+            "9",
+            "--allow-high-mbo-workers",
+        ]
+    )
+
+    assert "deprecated" in capsys.readouterr().err
+
+    config = cli.build_config(args, EnvSettings(api_key="key"))
+
+    assert config.allow_high_volume_workers is True
+
+
 def test_build_config_resolves_symlinked_data_dir(tmp_path: Path) -> None:
     target = tmp_path / "archive-target"
     target.mkdir()

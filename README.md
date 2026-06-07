@@ -92,9 +92,11 @@ environment variables.
 
 The default worker count is `4`. Increase `--workers` only after observing
 Databento retry/rate-limit logs for your account; the hard CLI maximum is `100`.
-MBO downloads are capped at `8` workers unless you pass
-`--allow-high-mbo-workers`, because each failed/retried MBO stream restarts from
-byte zero and can materially increase billable attempted bytes.
+High-volume book schemas (`mbo` and `mbp-10`) are capped at `8` workers unless
+you pass `--allow-high-volume-workers`, because each failed/retried stream
+restarts from byte zero and can materially increase billable attempted bytes.
+The deprecated `--allow-high-mbo-workers` flag is kept as an alias for the same
+behavior.
 The cost-estimation phase follows the Helix downloader model: one account-aware
 `get_cost` request per missing `(symbol, schema)` span, bounded to at most 40
 concurrent metadata requests. If a span exhausts retry attempts, the estimator
@@ -180,8 +182,9 @@ coverage dates, not local exchange launch dates; CME Sunday-evening CT launches
 typically start on the following UTC day.
 
 When `--schemas` is omitted, the downloader uses the free metadata schemas:
-`definition`, `status`, and `statistics`. MBO is intentionally opt-in because it
-can be expensive over broad ranges.
+`definition`, `status`, and `statistics`. The billable book schemas `mbo`
+(market-by-order) and `mbp-10` (market-by-price, 10 levels) are intentionally
+opt-in because they can be expensive over broad ranges.
 
 Explicit symbols override the default universe:
 

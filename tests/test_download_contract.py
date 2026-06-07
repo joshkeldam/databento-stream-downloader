@@ -2133,7 +2133,7 @@ def test_stream_missing_throttles_large_estimated_streams(tmp_path: Path) -> Non
         update={
             "end": date(2026, 4, 10),
             "max_workers": runner_stream._MAX_LARGE_STREAMS + 4,
-            "allow_high_mbo_workers": True,
+            "allow_high_volume_workers": True,
         }
     )
     items = [
