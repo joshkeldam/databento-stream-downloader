@@ -1361,6 +1361,27 @@ def test_run_download_skips_cached_validation_by_default(tmp_path: Path) -> None
     _run_download(config, FakeClient(), Console(record=True))
 
 
+def test_cached_run_does_not_rewrite_coverage_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    path = canonical_path(tmp_path, "ES.FUT", "mbo", date(2026, 4, 1))
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"cached")
+
+    def fail_manifest_write(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("cached run must not rewrite coverage manifest")
+
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "write_download_coverage_manifest",
+        fail_manifest_write,
+    )
+
+    _run_download(config, FakeClient(), Console(record=True))
+
+
 def test_run_download_rejects_cached_garbage_even_with_matching_sidecar(
     tmp_path: Path,
 ) -> None:
@@ -2128,11 +2149,14 @@ def test_stream_missing_accepts_generator_with_per_key_estimates(
     assert result.estimated_cost_cents_landed == 3
 
 
-def test_stream_missing_throttles_large_estimated_streams(tmp_path: Path) -> None:
+def test_stream_missing_fills_configured_workers_when_admission_allows(
+    tmp_path: Path,
+) -> None:
+    max_workers = 8
     config = _config(tmp_path).model_copy(
         update={
             "end": date(2026, 4, 10),
-            "max_workers": runner_stream._MAX_LARGE_STREAMS + 4,
+            "max_workers": max_workers,
             "allow_high_volume_workers": True,
         }
     )
@@ -2142,7 +2166,7 @@ def test_stream_missing_throttles_large_estimated_streams(tmp_path: Path) -> Non
             schema="mbo",
             day=date(2026, 4, 1) + timedelta(days=index),
         )
-        for index in range(runner_stream._MAX_LARGE_STREAMS + 2)
+        for index in range(max_workers + 2)
     ]
 
     class ConcurrentLargeClient(FakeClient):
@@ -2173,14 +2197,11 @@ def test_stream_missing_throttles_large_estimated_streams(tmp_path: Path) -> Non
         client,
         Console(record=True),
         items,
-        estimated_bytes_by_item=dict.fromkeys(
-            items,
-            runner_stream._LARGE_STREAM_BYTES,
-        ),
+        estimated_bytes_by_item=dict.fromkeys(items, 512 * 1024 * 1024),
     )
 
     assert result.placed == len(items)
-    assert client.max_active_streams == 2
+    assert client.max_active_streams == max_workers
 
 
 def test_stream_missing_enforces_in_flight_planning_guard_across_partitions(

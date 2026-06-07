@@ -93,7 +93,7 @@ def test_sync_coverage_manifest_records_s3_gaps_from_previous_scope(
     assert manifest["groups"][0]["local_dates_not_in_s3"] == ["2026-04-02"]
 
 
-def test_manifest_merges_previous_scope_with_new_download_scope(
+def test_download_manifest_is_scoped_to_current_download_request(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "raw" / "glbx-mdp3" / "ES.FUT"
@@ -129,8 +129,8 @@ def test_manifest_merges_previous_scope_with_new_download_scope(
 
     manifest = json.loads((tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     groups = {(group["symbol"], group["schema"]): group for group in manifest["groups"]}
-    assert manifest["totals"]["expected_partitions"] == 2
-    assert groups[("ES.FUT", "definition")]["local_present"] == 1
+    assert manifest["totals"]["expected_partitions"] == 1
+    assert ("ES.FUT", "definition") not in groups
     assert groups[("ES.FUT", "mbo")]["local_present"] == 1
 
 

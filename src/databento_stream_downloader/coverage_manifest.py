@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ import structlog
 
 from databento_stream_downloader._runner.work import _iter_all_items
 from databento_stream_downloader.constants import DATASET, RAW_PREFIX
+from databento_stream_downloader.paths import canonical_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -87,8 +89,16 @@ def write_coverage_manifest(
     """Build and atomically write the coverage manifest."""
     data_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = data_dir / MANIFEST_FILENAME
-    previous = _read_previous_manifest_scope(manifest_path)
-    local_files = _collect_local_files(data_dir)
+    previous = (
+        None
+        if download_config is not None
+        else _read_previous_manifest_scope(manifest_path)
+    )
+    local_files = (
+        _collect_download_scope_files(download_config)
+        if download_config is not None
+        else _collect_local_files(data_dir)
+    )
     remote_files = _collect_remote_files(remote or {})
     expected = _expected_scope(download_config, previous, local_files, remote_files)
     payload = _build_manifest_payload(
@@ -251,6 +261,40 @@ def _collect_local_files(data_dir: Path) -> dict[str, _ManifestFile]:
             symbol=symbol,
             schema=schema,
             day=day,
+            size_bytes=size,
+            sha256=_read_sha256_sidecar(path),
+        )
+    return files
+
+
+def _collect_download_scope_files(
+    config: DownloadConfig,
+) -> dict[str, _ManifestFile]:
+    files: dict[str, _ManifestFile] = {}
+    for item in _iter_all_items(config):
+        path = canonical_path(config.data_dir, item.symbol, item.schema, item.day)
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            resolved = path.resolve(strict=False)
+        except OSError:
+            LOGGER.warning("coverage_manifest_local_resolve_failed", path=str(path))
+            continue
+        root = config.data_dir.resolve(strict=False)
+        if not resolved.is_relative_to(root):
+            LOGGER.warning("coverage_manifest_local_escape_ignored", path=str(path))
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            LOGGER.warning("coverage_manifest_local_stat_failed", path=str(path))
+            continue
+        relkey = path.relative_to(config.data_dir).as_posix()
+        files[relkey] = _ManifestFile(
+            relkey=relkey,
+            symbol=item.symbol,
+            schema=item.schema,
+            day=item.day,
             size_bytes=size,
             sha256=_read_sha256_sidecar(path),
         )
@@ -423,13 +467,25 @@ def _iso_sorted(dates: set[date]) -> list[str]:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    with tmp.open("w", encoding="utf-8") as file:
-        json.dump(payload, file, indent=2, sort_keys=True)
-        file.write("\n")
-        file.flush()
-        os.fsync(file.fileno())
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            fd = -1
+            json.dump(payload, file, indent=2, sort_keys=True)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
 
 
 __all__ = [

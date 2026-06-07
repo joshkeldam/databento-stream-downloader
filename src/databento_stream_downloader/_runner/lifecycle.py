@@ -31,16 +31,10 @@ from databento_stream_downloader._runner.ledger import (
     _print_retry_summary,
     _write_run_ledger,
 )
-from databento_stream_downloader._runner.stream import _stream_missing
 from databento_stream_downloader._runner.types import (
     DownloaderClient,
     WorkItem,
     _DirectoryFsyncTracker,
-)
-from databento_stream_downloader._runner.validation import (
-    _repair_missing_sidecars,
-    _validate,
-    _validate_cached_metadata_preflight,
 )
 from databento_stream_downloader._runner.work import (
     WorkKey,
@@ -53,7 +47,6 @@ from databento_stream_downloader.config import DownloadConfig, RunMode
 from databento_stream_downloader.coverage_manifest import (
     write_download_coverage_manifest,
 )
-from databento_stream_downloader.databento_client import DatabentoClient
 from databento_stream_downloader.errors import RetryableError
 from databento_stream_downloader.models import DownloadResult
 
@@ -64,6 +57,47 @@ _EOF_REFUSAL = "[bold red]Confirmation aborted by EOF.[/bold red]"
 LOGGER = structlog.get_logger(__name__)
 
 
+def _validate(
+    config: DownloadConfig,
+    console: Console,
+    work: Iterable[WorkItem],
+) -> int:
+    from databento_stream_downloader._runner.validation import _validate as validate
+
+    return validate(config, console, work)
+
+
+def _validate_cached_metadata_preflight(
+    config: DownloadConfig,
+    work: Iterable[WorkItem],
+    console: Console,
+) -> int:
+    from databento_stream_downloader._runner.validation import (
+        _validate_cached_metadata_preflight as validate_cached_metadata_preflight,
+    )
+
+    return validate_cached_metadata_preflight(config, work, console)
+
+
+def _repair_missing_sidecars(
+    config: DownloadConfig,
+    work: Iterable[WorkItem],
+    console: Console,
+    *,
+    fsync_tracker: _DirectoryFsyncTracker,
+) -> int:
+    from databento_stream_downloader._runner.validation import (
+        _repair_missing_sidecars as repair_missing_sidecars,
+    )
+
+    return repair_missing_sidecars(
+        config,
+        work,
+        console,
+        fsync_tracker=fsync_tracker,
+    )
+
+
 def run_download(
     config: DownloadConfig,
     api_key: str,
@@ -71,11 +105,7 @@ def run_download(
     error_console: Console | None = None,
 ) -> None:
     """Run cost estimation, streaming, and validation."""
-    client = DatabentoClient(
-        api_key,
-        request_timeout_seconds=config.request_timeout_seconds,
-    )
-    _run_download(config, client, console, error_console)
+    _run_download(config, None, console, error_console, api_key=api_key)
 
 
 def run_download_with_client(
@@ -92,14 +122,16 @@ def run_download_with_client(
     a stderr console so safety-critical output does not share stdout with normal
     human output.
     """
-    _run_download(config, client, console, error_console)
+    _run_download(config, client, console, error_console, api_key=None)
 
 
 def _run_download(
     config: DownloadConfig,
-    client: DownloaderClient,
+    client: DownloaderClient | None,
     console: Console,
     error_console: Console | None = None,
+    *,
+    api_key: str | None = None,
 ) -> None:
     error_console = error_console or Console(stderr=True)
     run_id = str(uuid.uuid4())
@@ -119,6 +151,7 @@ def _run_download(
         _run_download_locked(
             config=config,
             client=client,
+            api_key=api_key,
             console=console,
             error_console=error_console,
             run_id=run_id,
@@ -130,7 +163,8 @@ def _run_download(
 def _run_download_locked(
     *,
     config: DownloadConfig,
-    client: DownloaderClient,
+    client: DownloaderClient | None,
+    api_key: str | None,
     console: Console,
     error_console: Console,
     run_id: str,
@@ -203,8 +237,11 @@ def _run_download_locked(
             )
             if validation_issues:
                 raise SystemExit(5)
-        _write_coverage_manifest(config, run_id)
+            _write_coverage_manifest(config, run_id)
         return
+
+    if client is None:
+        client = _databento_client(config, api_key)
 
     try:
         estimates = _estimate_costs(
@@ -265,6 +302,8 @@ def _run_download_locked(
             return
 
     started = time.monotonic()
+    from databento_stream_downloader._runner.stream import _stream_missing
+
     result = _stream_missing(
         config,
         client,
@@ -355,6 +394,18 @@ def _run_exit_code(result: DownloadResult, validation_issues: int) -> int:
 def _write_coverage_manifest(config: DownloadConfig, run_id: str) -> None:
     manifest_path = write_download_coverage_manifest(config, run_id=run_id)
     LOGGER.info("coverage_manifest_updated", path=str(manifest_path))
+
+
+def _databento_client(config: DownloadConfig, api_key: str | None) -> DownloaderClient:
+    if api_key is None:
+        msg = "api_key is required when no downloader client is injected"
+        raise RuntimeError(msg)
+    from databento_stream_downloader.databento_client import DatabentoClient
+
+    return DatabentoClient(
+        api_key,
+        request_timeout_seconds=config.request_timeout_seconds,
+    )
 
 
 def _utc_now() -> str:
