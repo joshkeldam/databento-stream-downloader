@@ -1,85 +1,77 @@
 # Databento Stream Downloader
 
 [![CI](https://github.com/joshkeldam/databento-stream-downloader/actions/workflows/ci.yml/badge.svg)](https://github.com/joshkeldam/databento-stream-downloader/actions/workflows/ci.yml)
-![Python 3.13-3.14](https://img.shields.io/badge/python-3.13--3.14-blue)
+![Python 3.14](https://img.shields.io/badge/python-3.14-blue)
 ![MIT License](https://img.shields.io/badge/license-MIT-green)
 
-Standalone Databento historical stream downloader for canonical raw market data
-archives.
+`databento-stream-downloader` builds and maintains a canonical local archive of
+Databento historical DBN data. It downloads one UTC-day partition at a time,
+stores raw `.dbn.zst` files without converting them, records an operational
+ledger, writes coverage manifests, and can mirror the archive to or from S3.
 
-## Status
+The package is intentionally narrow:
 
-This is a focused raw-data downloader optimized for throughput by default.
-Execute runs require an explicit estimated-cost planning cap and no-data days
-are still materialized as zero-record DBN files. Per-file SHA256 sidecars,
-post-write DBN metadata validation, fsync, and cached-file DBN preflight are
-opt-in via `--write-sidecars`, `--validate-on-write`, `--fsync-writes`, and
-`--validate-cached`; the `--paranoid` preset enables all of them at once. See
-the **Performance modes** section below.
+- Download raw Databento historical streams into a deterministic filesystem
+  layout.
+- Estimate missing-work cost before execution and require an explicit planning
+  cap for billable runs.
+- Treat semantic no-data days as real coverage by writing metadata-valid,
+  zero-record DBN files.
+- Keep validation, sidecars, fsync, and strict record checks opt-in so cached
+  and no-op runs start quickly.
+- Sync the archive to S3 with idempotent planning and explicit delete
+  confirmation.
 
-## Canonical Layout
+It does not implement trading strategy logic, backtests, feature engineering,
+DBN-to-Parquet conversion, or Databento account billing reconciliation.
 
-```text
-raw/glbx-mdp3/{symbol}/{schema}/{YYYY-MM-DD}.dbn.zst
-```
+## Installation
 
-Every canonical file must satisfy:
+This repository is currently a clone-and-run package. It has package metadata
+and console scripts, but there is no PyPI publishing workflow or signed release
+artifact yet.
 
-```text
-dataset = GLBX.MDP3
-stype_in = parent
-symbols = [{symbol}]
-schema = {schema}
-start/end = exact UTC day bounds
-```
+Requirements:
 
-Semantic no-data days are represented by a zero-record, metadata-valid DBN file.
-A missing file means missing coverage. Databento HTTP 422 responses are only
-treated as semantic no-data when the response text matches known no-records
-messages; unsupported schemas, invalid symbols, malformed parameters, and other
-gateway validation failures are fatal API errors.
+- Python `3.14`
+- `uv`
+- A Databento API key for download and dry-run cost estimation
+- AWS credentials only when using S3 sync
 
-Validation defaults to metadata-first. The DBN metadata validator checks
-magic/version, metadata shape, and parent symbol semantics. SHA256 sidecar
-consistency is checked when cached files are validated through
-`--validate-cached` or `--validate-only`; the startup repair preflight only
-ensures sidecars exist and are syntactically/hash consistent enough to avoid
-signing unknown bytes. `--deep-validate` additionally drains the full zstd
-frame. `--strict-validate` performs a DBNStore record pass: it decodes records
-in chunks, verifies `ts_recv` is inside the requested half-open UTC day
-`[start, end)` when available and falls back to `ts_event` for schemas without
-`ts_recv`, checks
-per-instrument `ts_recv` monotonicity where the schema exposes `instrument_id`
-and `ts_recv`, and verifies observed instrument IDs are present in the DBN
-symbology mappings.
-It still does not infer CME trading calendars or reject zero-record semantic
-no-data files. Strict validation is intentionally opt-in and expensive on large
-MBO days. It treats `instrument_id == 0` as a system/sentinel record and
-excludes those records from symbology coverage and per-instrument monotonicity
-checks; Databento's public DBN docs do not currently state this as a permanent
-reservation, so this assumption should be re-confirmed before applying strict
-validation to new datasets or schemas.
-
-## Usage
-
-Clone the repository, install the locked environment with `uv`, and run the CLI:
+Set up the locked development environment:
 
 ```bash
+git clone https://github.com/joshkeldam/databento-stream-downloader.git
+cd databento-stream-downloader
 uv sync --locked --all-groups
 ```
 
-```bash
-export DATABENTO_API_KEY=...
-export DATABENTO_MAX_COST_CENTS=0
-export DATABENTO_ALLOW_FREE_ONLY=true
+The installed console scripts are:
 
-just databento \
-  --schemas definition status statistics \
-  --start 2015-01-01 \
-  --end 2026-03-31
+```text
+databento-stream-downloader
+databento-stream-sync
 ```
 
-Or create a local `.env` file in the repository root:
+The repository `justfile` provides short aliases:
+
+```bash
+just databento --help
+just s3 --help
+```
+
+Equivalent direct commands:
+
+```bash
+uv run --locked databento-stream-downloader --help
+uv run --locked databento-stream-sync --help
+```
+
+## Quick Start
+
+Create a `.env` file in the repository root, or export the same variables in
+your shell. The CLI loads `.env` from the current working directory before
+reading environment variables.
 
 ```text
 DATABENTO_API_KEY=your_key_here
@@ -87,106 +79,27 @@ DATABENTO_MAX_COST_CENTS=0
 DATABENTO_ALLOW_FREE_ONLY=true
 ```
 
-The CLI loads `.env` from the current working directory before reading
-environment variables.
-
-The default worker count is `4`. Increase `--workers` only after observing
-Databento retry/rate-limit logs for your account; the hard CLI maximum is `100`.
-High-volume book schemas (`mbo` and `mbp-10`) are capped at `8` workers unless
-you pass `--allow-high-volume-workers`, because each failed/retried stream
-restarts from byte zero and can materially increase billable attempted bytes.
-The deprecated `--allow-high-mbo-workers` flag is kept as an alias for the same
-behavior.
-The cost-estimation phase follows the Helix downloader model: one account-aware
-`get_cost` request per missing `(symbol, schema)` span, bounded to at most 40
-concurrent metadata requests. If a span exhausts retry attempts, the estimator
-recursively splits only that failing span into smaller `get_cost` requests
-before giving up on a single UTC day. This preserves Databento account discounts
-and free-schema pricing. Use `--show-retries` to print the total retry sleeps
-attempted by the real Databento client at the end of the run.
-
-## Performance modes
-
-The default execute path follows a "trust file existence + atomic move"
-posture: the runner streams to a temporary file, atomically renames into the
-canonical path, and trusts the OS for durability. Cached files are not
-re-read on startup. Validation and integrity checks are opt-in:
-
-| Flag | What it adds | Per-file overhead |
-|---|---|---|
-| `--validate-on-write` | DBN metadata header check after each download | One zstd-decompress + header decode |
-| `--write-sidecars` | `{file}.sha256` written next to every placed file | One full file read + sidecar write |
-| `--fsync-writes` | `fsync` on data file, sidecar, and parent directory | Several syscalls; can be very slow on macOS |
-| `--validate-cached` | DBN metadata header check on every cached file at startup | Reads every cached file's header before any download starts |
-| `--validate-only` | Only validate cached files; no Databento requests | Same as `--validate-cached` |
-| `--deep-validate` | Drain full zstd frame to EOF (implies `--validate-on-write`) | Full file decompression |
-| `--strict-validate` | DBNStore record-level checks (implies `--validate-on-write`) | Full file decode |
-| `--paranoid` | Preset that enables `--write-sidecars`, `--validate-on-write`, and `--fsync-writes` | All of the above |
-
-What you give up in default mode: bit-rot detection (no per-file SHA256), per-write
-header validation (corruption surfaces only at the next `--validate-cached` run
-or at consumer read time), and crash durability after rename (atomic replace
-still applies, so no half-files are visible — but recently written files may be
-lost on power loss). All four are recoverable: re-run the download. The run is
-incremental.
-
-## Syncing to S3
-
-`databento-stream-sync` mirrors the local archive to (or from) an S3 bucket
-with the same Live UI as the downloader. Two subcommands cover the
-directions:
+Run a free metadata-schema download for the default CME futures universe:
 
 ```bash
-just s3 push --workers 50          # local → s3
-just s3 pull --workers 50          # s3   → local
-just s3 push --dry-run             # plan, no transfer
-just s3 pull --delete              # remove local files not in s3
+just databento \
+  --start 2026-04-01 \
+  --end 2026-04-01 \
+  --schemas definition status statistics \
+  --yes
 ```
 
-S3 keys mirror the archive layout with the leading `data/` stripped:
-`data/raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst` ↔
-`s3://{bucket}/raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst`. An optional
-`DATABENTO_S3_PREFIX` is prepended after stripping `data/`.
+Run the same request as a dry run:
 
-Configuration is taken from `--bucket / --prefix / --region` flags or
-`DATABENTO_S3_BUCKET / DATABENTO_S3_PREFIX / DATABENTO_S3_REGION` env vars.
-AWS credentials follow the standard boto3 chain (env vars,
-`~/.aws/credentials`, instance profile).
+```bash
+just databento \
+  --start 2026-04-01 \
+  --end 2026-04-01 \
+  --schemas definition status statistics \
+  --dry-run
+```
 
-After every completed downloader run, the tool rewrites
-`data/databento-coverage-manifest.json` from the archive filesystem. After
-every S3 sync, it refreshes the same manifest with a fresh S3 inventory; push
-runs also upload the manifest to
-`s3://{bucket}/{prefix}/databento-coverage-manifest.json`. The manifest lists
-local files, S3 files, per-symbol/schema missing dates, local files not yet in
-S3, and S3 files not present locally.
-
-Difference detection is size-based and idempotent: a re-run uploads or
-downloads nothing. `--verify-sha256` additionally cross-checks the local
-`.sha256` sidecar against the `Metadata.sha256` set during the original
-push. `--delete` is opt-in and requires the user to type `delete` (not
-just `y`) at the confirmation prompt; the standard `Proceed? [y/N]`
-applies to transfer-only runs. `--fsync-writes` is pull-only and brings
-back the same fsync posture available to the downloader.
-
-The default cap of `--workers` is `4` and the hard maximum is `100`,
-matching the downloader. Throughput is byte-based in the Live UI, so the
-ETA reflects bytes-remaining and not just file-count remaining.
-
-When `--symbols` is omitted, the downloader uses the default CME futures
-universe in `src/databento_stream_downloader/universe.toml`. That file also
-contains first UTC data days for newer products. Requested ranges are clipped
-per symbol before cost estimation and streaming so broad historical default
-runs do not materialize pre-data no-data coverage. These are UTC archive
-coverage dates, not local exchange launch dates; CME Sunday-evening CT launches
-typically start on the following UTC day.
-
-When `--schemas` is omitted, the downloader uses the free metadata schemas:
-`definition`, `status`, and `statistics`. The billable book schemas `mbo`
-(market-by-order) and `mbp-10` (market-by-price, 10 levels) are intentionally
-opt-in because they can be expensive over broad ranges.
-
-Explicit symbols override the default universe:
+Download an explicit billable MBO range:
 
 ```bash
 just databento \
@@ -198,78 +111,387 @@ just databento \
   --yes
 ```
 
-`--symbol` and `--symbols` are aliases for the same option. Pass one occurrence
-with one or more values; if both aliases are repeated, argparse keeps the last
-occurrence.
+Validate an existing cached scope without a Databento API key or cost request:
 
-By default, files are written under `./data`, matching:
+```bash
+just databento \
+  --symbol ES.FUT \
+  --schemas mbo \
+  --start 2026-04-01 \
+  --end 2026-04-24 \
+  --validate-only
+```
+
+## Archive Layout
+
+The default archive root is `./data`. Canonical DBN files are stored at:
 
 ```text
 data/raw/glbx-mdp3/{symbol}/{schema}/{YYYY-MM-DD}.dbn.zst
 ```
 
-The downloader estimates cost and size once for each missing symbol/schema span.
+For example:
+
+```text
+data/raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst
+```
+
+Every canonical file is intended to represent:
+
+```text
+dataset = GLBX.MDP3
+stype_in = parent
+symbols = [{symbol}]
+schema = {schema}
+start/end = exact UTC day bounds
+```
+
+A missing canonical file means missing coverage. A valid zero-record DBN file
+means Databento returned semantic no data for that symbol, schema, and UTC day.
+Databento HTTP 422 responses are only treated as semantic no-data when the
+response text matches known no-records messages. Unsupported schemas, invalid
+symbols, malformed parameters, and other validation failures are fatal API
+errors.
+
+The downloader treats request dates as UTC calendar days, not CME session days.
+Default-universe requests are clipped by the first UTC data day recorded in
+`src/databento_stream_downloader/universe.toml`, so broad historical runs do not
+create pre-data no-data files for newer products.
+
+## Symbols and Schemas
+
+If `--symbols` is omitted, the downloader uses the default CME futures universe
+from `src/databento_stream_downloader/universe.toml`.
+
+If `--schemas` is omitted, the downloader uses the free metadata schemas:
+
+```text
+definition statistics status
+```
+
+Supported schemas:
+
+```text
+definition
+statistics
+status
+mbo
+mbp-10
+```
+
+`mbo` and `mbp-10` are high-volume book schemas. They are opt-in because they
+can be expensive over broad ranges and because failed stream retries restart
+from byte zero.
+
+`--symbol` and `--symbols` are aliases. Pass one occurrence with one or more
+values:
+
+```bash
+just databento --symbols ES.FUT NQ.FUT --start 2026-04-01 --end 2026-04-01
+```
+
+Symbols are normalized to uppercase and must be Databento parent futures
+symbols such as `ES.FUT`.
+
+## Cost and Execution Safety
+
 Execute runs require either `--max-cost-cents` or
-`DATABENTO_MAX_COST_CENTS`, even when Databento estimates `$0.00`. This is a
-preflight planning cap on Databento's estimate, not a hard billing cap;
-Databento's billing records are the source of truth. A planning cap of `0` is
-accepted only with `--allow-free-only`; that combination means every estimated
-bucket and the run aggregate must be `$0.00`. The run exits before any download
-request if the estimate exceeds the planning cap. During streaming, the runner
-also tracks landed planned cost for completed partitions as a secondary guard.
-Failed and retried stream attempts can repeat billable work without increasing
-the landed completed-partition total, so actual billing can exceed
-`--max-cost-cents`. Concurrent workers can also have multiple billable
-partitions in flight. Before confirmation, the runner refuses when the largest
-currently possible in-flight set exceeds the planning cap. Pass
-`--allow-burst-exposure` only when you intentionally want admission throttling
-instead of that refusal. Use `--max-cost-cents-per-bucket` to set a planning cap
-for any single symbol/schema bucket. When a global planning cap is configured,
-the runner also warns if one bucket exceeds 25% of the global planning cap so an
-accidentally expensive line item is visible before execution.
+`DATABENTO_MAX_COST_CENTS`. This requirement applies even when Databento
+estimates `$0.00`, so unattended commands cannot accidentally start billable
+work without an explicit planning cap.
 
-Interactive runs ask for confirmation before downloading. Non-interactive runs
-must pass `--yes`; otherwise the command exits before making download requests.
-Use `--quiet` for cron-style runs where human progress output should be
-suppressed. Failed partition lines still go to stderr so cron logs retain
-actionable failure context; no-data partition rows are suppressed and summarized
-by the final counts.
+`--max-cost-cents 0` is accepted only with `--allow-free-only` or
+`DATABENTO_ALLOW_FREE_ONLY=true`. That combination means every estimated bucket
+and the aggregate run estimate must be `$0.00`.
 
-Downloads are written through a temporary file, metadata-validated as DBN, then
-placed at the canonical path. A `{file}.sha256` sidecar is written after
-placement. At run start, cached files in the requested scope that are missing
-sidecars, have malformed sidecars, or have sidecars whose digest does not match
-the canonical file are detected. Missing or malformed sidecars are repaired only
-after the canonical DBN metadata validates. Digest mismatches are treated as
-validation issues and are not rewritten, because rewriting would sign bytes that
-may be corrupt. Repairing a missing or malformed sidecar computes SHA256 over
-the canonical DBN file once. Each completed run appends a durable JSON record to
-`data/download-ledger.jsonl`; ledger records include `ledger_schema_version`.
-Consumers should ignore unknown fields, and breaking ledger changes will
-increment the schema version. Ledger schemas are stored under `schemas/`, and
-`scripts/validate_ledger.py` validates JSONL ledgers against the matching schema
-version. Version 4 records include `exit_code`, `interrupted`, retry counts,
-stream retry/attempt estimates, terminal outcome counts, and directory-fsync
-skip counts for post-run reconciliation. Ledger records
-include local `host` and `user` fields for incident correlation; treat ledgers
-as operational metadata and do not publish them unchanged. The active ledger
-rotates before append on the next ledger write when it already exceeds
-`--ledger-rotate-mb` MiB, defaulting to 50 MiB; a single large run is not rotated
-mid-run. Use
-`--deep-validate` to fully drain each zstd frame during validation. The public
-validation helper caps default decompression at 32 GiB; runner-managed
-validation uses the larger of 64 MiB or twice Databento's billable-size estimate
-for the partition. Use `--strict-validate` for record-level structural checks.
-Existing canonical files are treated as cached after sidecar preflight; use
-`--validate-cached` to verify cached file hashes and DBN metadata during a run.
-Cache discovery is filesystem-authoritative: only canonical files present under
-`data/raw/...` are treated as cached.
+Important billing caveats:
 
-Use `--validate-only` to scrub cached files in the requested scope without a
-Databento API key, cost estimate, or download request. This is the intended
-periodic integrity check for existing archives.
+- The cap is a preflight planning cap on Databento estimates, not a hard billing
+  cap.
+- Databento billing records are the source of truth.
+- Failed or retried streams can repeat billable work without increasing landed
+  completed-partition cost.
+- Concurrent workers can put several billable partitions in flight at once.
+- The runner refuses execution when the largest possible in-flight planning
+  window exceeds the planning cap, unless `--allow-burst-exposure` is passed.
 
-## Embedded Use
+The estimator makes one account-aware Databento `get_cost` request per missing
+`(symbol, schema)` span, with metadata concurrency bounded internally. If a span
+exhausts retry attempts, the estimator recursively splits only that failing span
+before giving up on a single UTC day.
+
+Interactive execute runs ask for confirmation before download or sync mutation.
+Non-interactive runs must pass `--yes`; otherwise the command exits before
+making download requests or S3 changes.
+
+## Downloader Options
+
+Common target and planning options:
+
+| Option | Meaning |
+|---|---|
+| `--symbols`, `--symbol` | Parent futures symbols to download. Defaults to the bundled CME futures universe. |
+| `--schemas` | Databento schemas to download. Defaults to `definition statistics status`. |
+| `--start` | Inclusive UTC start date in `YYYY-MM-DD` form. Required. |
+| `--end` | Inclusive UTC end date in `YYYY-MM-DD` form. Required. |
+| `--data-dir` | Local archive root. Defaults to `./data`. |
+| `--dry-run` | Estimate and print planned work without downloading billable data. |
+| `--yes`, `-y` | Proceed without an interactive confirmation prompt. |
+
+Cost and concurrency options:
+
+| Option | Meaning |
+|---|---|
+| `--workers` | Concurrent download workers. Default `4`, hard max `100`. |
+| `--allow-high-volume-workers` | Allow `mbo` or `mbp-10` above 8 workers after accepting retry and billing exposure. |
+| `--max-cost-cents` | Required execute-run Databento estimated planning cap in cents. |
+| `--allow-free-only` | Allows `--max-cost-cents 0` as an explicit free-only cap. |
+| `--max-cost-cents-per-bucket` | Optional cap for any one symbol/schema estimate bucket. |
+| `--allow-burst-exposure` | Use admission throttling instead of refusing when the largest possible in-flight window exceeds the cap. |
+| `--request-timeout-seconds` | Best-effort Databento SDK request timeout. Defaults to `600`. |
+
+Integrity, validation, and operations options:
+
+| Option | Meaning |
+|---|---|
+| `--validate-cached` | Revalidate already-cached files in scope before download work. |
+| `--validate-only` | Validate cached files only, with no Databento API key, cost, or download request. |
+| `--validate-on-write` | Validate DBN metadata after each write. |
+| `--deep-validate` | Drain zstd frames to EOF during validation. |
+| `--strict-validate` | Decode DBN records and run timestamp, symbology, and monotonicity checks. |
+| `--write-sidecars` | Write SHA256 sidecars for placed files. |
+| `--fsync-writes` | fsync placed files, sidecars, and parent directories. |
+| `--paranoid` | Enable sidecars, write-time validation, and fsync together. |
+| `--ledger-rotate-mb` | Rotate `download-ledger.jsonl` when it already exceeds this size. Defaults to `50`. |
+| `--suspicious-no-data-weekdays` | Fail all-no-data spans after this many expected weekdays. Defaults to `5`. |
+| `--quiet` | Suppress human progress output where possible. |
+| `--verbose` | Emit INFO-level operational logs. |
+| `--log-format` | `pretty` or `json`. |
+| `--log-file` | Append structured logs to a file instead of stderr. |
+| `--show-retries` | Print retry totals at the end of real-client runs. |
+| `--version` | Print the installed package version. |
+
+## Performance and Integrity Modes
+
+The default execute path is optimized for fast startup and high throughput:
+
+- Existing canonical files in the requested scope are treated as cached.
+- Cached files are not re-read on startup unless validation is requested.
+- New downloads stream to temporary files and are atomically renamed into place.
+- Per-file SHA256 sidecars, write-time DBN validation, and fsync are off by
+  default.
+- Cached no-op downloader runs do not rewrite the coverage manifest.
+
+Opt into stronger integrity checks when the run needs them:
+
+| Flag | What it adds | Cost |
+|---|---|---|
+| `--validate-on-write` | DBN metadata validation after each download | Reads enough DBN metadata to validate the file |
+| `--write-sidecars` | `{file}.sha256` next to every placed file | Full file read plus sidecar write |
+| `--fsync-writes` | fsync placed file, sidecar, and parent directory | Extra syscalls, often slow on macOS |
+| `--validate-cached` | Revalidate cached files in the requested scope | Reads cached files before download work |
+| `--validate-only` | Validate cached files and make no Databento requests | Local validation only |
+| `--deep-validate` | Drain each zstd frame to EOF | Full decompression |
+| `--strict-validate` | DBNStore record-level checks | Full DBN record decode |
+| `--paranoid` | Enables `--write-sidecars`, `--validate-on-write`, and `--fsync-writes` | Strictest write posture |
+
+Strict validation checks record timestamp bounds for the half-open UTC day
+`[start, end)`, symbology coverage, and per-instrument `ts_recv` monotonicity
+where the schema exposes the required fields. It treats `instrument_id == 0` as
+a system or sentinel record for those checks. This is intentionally expensive on
+large MBO days.
+
+What default mode gives up:
+
+- No bit-rot detection unless sidecars or validation are enabled.
+- No write-time DBN metadata validation unless requested.
+- No explicit crash-durability fsync after atomic rename unless requested.
+
+These tradeoffs are recoverable for this archive model: rerunning the same
+scope fills missing files and can revalidate cached files.
+
+## S3 Sync
+
+`databento-stream-sync` mirrors the local archive to S3 or restores it from S3.
+
+```bash
+just s3 push --bucket my-bucket --workers 50 --yes
+just s3 pull --bucket my-bucket --workers 50 --yes
+just s3 push --bucket my-bucket --dry-run
+just s3 pull --bucket my-bucket --delete
+```
+
+S3 keys mirror the archive layout with the leading `data/` stripped:
+
+```text
+data/raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst
+s3://{bucket}/{prefix}/raw/glbx-mdp3/ES.FUT/mbo/2026-04-01.dbn.zst
+```
+
+Configuration can be supplied by flags or environment variables:
+
+| Flag | Environment variable |
+|---|---|
+| `--bucket` | `DATABENTO_S3_BUCKET` |
+| `--prefix` | `DATABENTO_S3_PREFIX` |
+| `--region` | `DATABENTO_S3_REGION` |
+
+AWS credentials use the standard boto3 provider chain, including environment
+variables, shared credentials files, SSO or profile configuration, and instance
+or role credentials where available.
+
+Sync planning modes:
+
+| Mode | Behavior |
+|---|---|
+| `size` | Treat matching relative keys and byte sizes as equal |
+| `sidecar` | Use local `.sha256` sidecars where available |
+| `head-metadata` | Use S3 `Metadata.sha256` for stronger comparison |
+
+`--verify-sha256` cross-checks local sidecars against S3 object metadata.
+`--delete` removes destination-only files and requires typed confirmation with
+the word `delete`. Transfer-only runs use the normal `Proceed? [y/N]`
+confirmation. `--fsync-writes` is pull-only and applies the downloader's fsync
+posture to restored local files.
+
+The S3 client uses botocore adaptive retries, explicit socket timeouts, TCP
+keepalive, and a connection pool sized to at least the configured sync worker
+count. Managed boto3 transfer threads are disabled per object so repo-level
+`--workers` controls actual transfer concurrency.
+
+S3 sync options:
+
+| Option | Meaning |
+|---|---|
+| `push` | Upload local archive files to S3. |
+| `pull` | Download S3 archive files to local storage. |
+| `--data-dir` | Local archive root. Defaults to `./data`. |
+| `--bucket` | S3 bucket name. Defaults to `DATABENTO_S3_BUCKET`. |
+| `--prefix` | S3 key prefix. Defaults to `DATABENTO_S3_PREFIX`. |
+| `--region` | AWS region. Defaults to `DATABENTO_S3_REGION` or the boto3 default. |
+| `--workers` | Concurrent transfer workers. Default `4`, hard max `100`. |
+| `--delete` | Remove destination-only files after typed confirmation. |
+| `--verify-sha256` | Cross-check local sidecars against S3 object metadata. |
+| `--planning-mode` | `size`, `sidecar`, or `head-metadata`. |
+| `--fsync-writes` | Pull only: fsync placed files and parent directories. |
+| `--dry-run` | Render the plan and exit without transfer or delete work. |
+| `--yes`, `-y` | Proceed without an interactive confirmation prompt. |
+| `--quiet` | Suppress the Live UI. Logs and failures still print. |
+| `--verbose` | Emit INFO-level operational logs. |
+| `--log-format` | `pretty` or `json`. |
+| `--log-file` | Append structured logs to a file instead of stderr. |
+| `--version` | Print the installed package version. |
+
+## Manifests and Ledger
+
+The downloader writes an operational ledger to:
+
+```text
+data/download-ledger.jsonl
+```
+
+Ledger records include `ledger_schema_version`. Consumers should ignore unknown
+fields. Breaking ledger changes increment the schema version, and JSON schemas
+are stored under `schemas/`. The active ledger rotates before append when it
+already exceeds `--ledger-rotate-mb` MiB, defaulting to 50 MiB. Ledger records
+include local `host` and `user` fields for incident correlation, so do not
+publish raw ledgers unchanged.
+
+Coverage manifests are written to:
+
+```text
+data/databento-coverage-manifest.json
+```
+
+Downloader runs write the manifest for the requested symbol, schema, and date
+scope after files are placed or validated. They do not scan the full archive for
+cached no-op runs.
+
+S3 sync runs write a manifest from local and remote inventories. Successful push
+runs also upload it to:
+
+```text
+s3://{bucket}/{prefix}/databento-coverage-manifest.json
+```
+
+The manifest includes:
+
+- generator and schema version
+- request or sync context
+- local file totals
+- S3 file totals when remote inventory is available
+- expected partitions by symbol and schema
+- missing local dates
+- missing S3 dates
+- local files not present in S3
+- S3 files not present locally
+
+## Failure Handling and Retries
+
+Databento request, metadata, and stream operations use separate retry budgets.
+The downloader retries transient HTTP 408, HTTP 429, HTTP 5xx, retryable
+Databento SDK errors, DNS failures, socket failures, and timeouts. Numeric and
+HTTP-date `Retry-After` values are honored with a cap.
+
+Streaming downloads are not resumable. If a stream fails mid-file, the partition
+can only restart from byte zero. Small or early stream failures are retried, but
+once a failed stream has already written a large temporary file, in-process
+retries for that partition are suppressed to avoid repeated multi-GiB restarts.
+
+Ctrl+C and SIGTERM cancel pending work and exit with documented codes. An
+already-issued Databento `timeseries.get_range(path=...)` call can only stop
+when the SDK or socket call returns.
+
+Temporary files older than five minutes are removed at run start. The sweep is
+scoped to the requested symbol and schema directories. Normal failure paths
+clean their own temporary files.
+
+## Local Filesystem Expectations
+
+Use a local filesystem for `--data-dir`. The runner uses local lock and atomic
+rename semantics. It rejects known network filesystems from Linux mount tables,
+macOS mount output, and Windows remote-drive detection when possible. If
+detection is unavailable, it prints a warning before continuing.
+
+Symlinked data directories are accepted for local volume mounts. Locking and
+durability apply to the resolved local filesystem target.
+
+The preflight size check uses Databento's billable-size estimate as a disk-space
+heuristic. Actual compressed DBN size can differ by schema and day.
+
+## Logging
+
+Default logging is human-readable. Use:
+
+```bash
+--verbose
+--log-format json
+--log-file path/to/events.jsonl
+--quiet
+--show-retries
+```
+
+When JSON logs are written to stderr, human progress output is routed to stdout
+so the JSON stream remains parseable. Failed partition lines still go to stderr
+so cron logs retain actionable failure context.
+
+## Exit Codes
+
+| Code | Meaning |
+|---:|---|
+| `0` | Success |
+| `1` | Retry exhaustion or fatal API failure before streaming completes |
+| `2` | Usage, config, or safety refusal |
+| `3` | Partial download failure |
+| `4` | Unexpected internal error |
+| `5` | Validation failure |
+| `130` | Interrupted by Ctrl+C |
+| `143` | Graceful shutdown signal |
+
+## Python API
+
+The CLI is the primary compatibility target. A small typed import surface is
+available for embedding and tests:
 
 ```python
 from datetime import date
@@ -285,6 +507,7 @@ from databento_stream_downloader import (
 )
 
 configure_logging(log_format="pretty", log_file=None, verbose=False)
+
 config = DownloadConfig(
     data_dir=Path("data"),
     symbols=("ES.FUT",),
@@ -295,143 +518,59 @@ config = DownloadConfig(
     max_cost_cents=0,
     allow_free_only=True,
 )
+
 run_download_with_client(config, fake_client, Console())
 ```
 
-Warnings and errors are emitted to structured logs by default. Use `--verbose`
-for INFO-level operational events. Use `--log-format=json` for machine-readable
-JSON logs, and `--log-file path/to/log.jsonl` to persist them. When JSON logs
-are written to stderr, human progress output is routed to stdout so the JSON
-stream remains parseable.
+Exported names include configuration types, error types, logging setup, default
+symbol loading, DBN metadata validation, canonical path construction, and
+download runner entry points. Private modules under `_runner` and `_sync` are
+implementation details.
 
-The default `./data` directory is git-ignored. For large archives, point
-`--data-dir` at a dedicated local volume or mounted object-store cache.
-The local filesystem backend assumes local-disk locking semantics; do not point
-`--data-dir` at NFS or another shared network filesystem without an external
-lock. The runner rejects known network filesystems from Linux mount tables,
-macOS mount output, and Windows remote-drive detection when possible; if
-detection is unavailable, it prints a warning before continuing. Symlinked data
-directories are accepted for local volume mounts; locking and durability apply
-to the resolved local filesystem target.
+## Development
 
-The preflight size check uses Databento's billable-size estimate as a
-conservative disk-space heuristic. Actual compressed DBN-on-disk size can differ
-by schema and day.
-
-Cost estimates are summed as decimal dollar values after Databento returns each
-missing symbol/schema span estimate. Per-row table display is rounded to cents,
-but the run-level planning cap is checked after aggregating all Decimal dollar
-estimates and rounding once. The in-flight planning guard is based on the
-planned per-partition estimate allocation; it is not a live billing feed and
-does not include failed or retried stream attempts that never become canonical
-files. Admission control submits new workers only when committed plus
-outstanding planned cost stays within the cap, unless `--allow-burst-exposure`
-was used. In-flight landed planned cost is accumulated from
-the symbol/schema bucket estimate assigned to completed partitions. Semantic
-no-data partitions still receive planned estimated cost and bytes, and sparse
-missing days are allocated evenly within each symbol/schema estimate bucket.
-
-On POSIX filesystems, placement uses the standard fsync-file, rename,
-fsync-directory pattern as far as the Databento SDK path-writing API allows. The
-SDK owns the original writer file descriptor, so the downloader performs a
-best-effort fsync after the SDK closes the temporary file, then renames and
-fsyncs the directory. On Windows, Python does not expose equivalent directory
-fsync semantics through `os.open`, so crash durability after rename is weaker.
-
-Shutdown is cooperative. Ctrl+C and SIGTERM cancel pending work and exit with a
-documented code, but an already-issued Databento stream in a worker thread can
-only stop when the SDK/socket call returns. The CLI applies
-`--request-timeout-seconds` as a best-effort timeout to the current Databento SDK
-metadata and timeseries HTTP APIs. The SDK still does not expose a hard
-cancellation handle for an already-running `timeseries.get_range(path=...)`, so
-large MBO files may take time to unwind after a signal.
-
-Streaming downloads are not resumable. If the SDK or network fails mid-file, the
-partition can only restart from byte zero. Small/early stream failures are
-retried, but once a failed stream has already written a large temporary file the
-runner suppresses further in-process retries for that partition to avoid
-repeated multi-GiB restarts. Actual Databento billing can still exceed
-`--max-cost-cents` on failed/retried streams because the planning cap is based on
-completed partitions, not attempted bytes or a refund-aware billing feed.
-Metadata estimation and stream retries use a larger MBO-oriented backoff budget
-than ordinary API requests: six attempts with exponential sleeps capped at 60
-seconds when retrying remains safe. Retry logs include the operation name and
-mark stream retries as restarting from byte zero. Ledger v4 records the run exit
-code, total retry counts, retry counts by operation, stream retry count,
-estimated stream attempt count, and terminal outcomes for post-run
-reconciliation.
-
-Temporary files older than five minutes are removed at run start and logged as
-warnings. The sweep is scoped to the requested symbol/schema directories rather
-than the whole archive tree. Normal failure paths clean their own temporary
-files; the sweep is a watchdog for SIGKILL or process crashes, not part of the
-happy-path cleanup contract.
-
-No-data files do not distinguish CME holidays from valid trading days with no
-records. Request bounds are UTC calendar days, not CME session days. To catch
-bad parent symbols or pre-data date ranges, the runner fails loudly if every
-partition for one symbol/schema returns no data across at least five expected
-weekdays on or after that symbol's configured first UTC data day.
-Use `--suspicious-no-data-weekdays` to tune that threshold for short runs.
-
-DBN header versions newer than the versions known to this package are not
-rejected solely by header number. The downloader logs one warning for the
-unknown version and lets the installed Databento DBN SDK attempt metadata decode;
-if the SDK cannot decode the file, validation fails.
-
-## Exit Codes
-
-- `0` success.
-- `1` retry exhaustion or fatal API failure before streaming completes.
-- `2` usage/config/safety refusal, including missing planning cap.
-- `3` partial download failure.
-- `4` unexpected internal error.
-- `5` validation failure.
-- `130` interrupted by Ctrl+C.
-- `143` graceful shutdown signal.
-
-## Quality Gates
+Run the full local gate:
 
 ```bash
 just check
 ```
 
-GitHub Actions runs these checks on Linux, macOS, and Windows. Coverage is
-enforced in CI with a 92% global floor plus explicit per-file floors for the CLI
-and Databento client adapter. Pre-commit hooks and dependency auditing run in
-CI, and the package build is verified as part of the quality gate. CI also emits
-a CycloneDX JSON dependency SBOM artifact generated from the locked runtime
-requirements.
+Important subcommands:
 
-This repository is currently clone-and-run software, not a published release
-channel. There is no PyPI publishing workflow, signed wheel, or provenance
-attestation yet. If release artifacts are added later, they should use PyPI
-Trusted Publishing, Sigstore signing, and GitHub provenance attestations.
+```bash
+just lint
+just typecheck
+just test
+just test-cov
+just audit
+just build
+```
 
-Dependency versions are exact in `pyproject.toml` by design. This repository is
-intended to be cloned and run with the committed `uv.lock`, not imported as a
-library dependency with flexible transitive constraints. Dependabot is scheduled
-monthly rather than weekly so dependency refreshes are deliberate maintenance
-events that update both `pyproject.toml` and `uv.lock` together.
+GitHub Actions runs the gate on Linux, macOS, and Windows. Coverage is enforced
+with a 92% global floor plus per-file floors for critical modules. The package
+build is verified, dependency auditing runs from the locked runtime
+requirements, and CI emits a CycloneDX JSON dependency SBOM artifact.
 
-The Python import surface is intentionally small: configuration, error types,
-logging setup, default-symbol loading, and `run_download` entry points are
-exported for embedding. CLI behavior remains the primary compatibility target.
+Dependency versions are exact in `pyproject.toml` and locked in `uv.lock` by
+design. Dependency refreshes should update both files together.
 
-## Roadmap
+## Security and Data Handling
 
-1. Add an S3 storage backend.
-2. Add deterministic dry-run plan artifacts with `--from-plan` replay in the
-   next minor release.
-3. Add container packaging.
-4. Add scheduled daily capture examples for common cloud runtimes.
-5. Add optional Databento-key integration smoke tests for SDK compatibility.
-6. Add optional OpenTelemetry export for run, request, and partition metrics.
+Do not commit `.env`, API keys, AWS credentials, ledgers, or downloaded market
+data. The default `./data` directory is git-ignored.
+
+Ledger files can contain local host and user metadata. Treat them as operational
+artifacts, not public release assets.
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## Non-Goals
 
-- No strategy, backtest, or feature logic.
-- No conversion away from raw DBN in this package.
+- No strategy, signal, backtest, or portfolio logic.
+- No DBN-to-Parquet or database loading pipeline.
+- No exchange calendar inference beyond configured first UTC data days.
+- No hard Databento billing cap or refund-aware billing reconciliation.
+- No resumable partial DBN stream downloads.
 
 ## License
 
