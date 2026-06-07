@@ -15,13 +15,22 @@ from typing import Any, Never, cast
 
 import boto3
 import structlog
+from boto3.exceptions import (
+    RetriesExceededError,
+    S3TransferFailedError,
+    S3UploadFailedError,
+)
+from boto3.s3.transfer import TransferConfig
 from botocore.client import Config
 from botocore.exceptions import (
+    BotoCoreError,
     ClientError,
     ConnectionClosedError,
     ConnectTimeoutError,
+    CredentialRetrievalError,
     EndpointConnectionError,
     NoCredentialsError,
+    PartialCredentialsError,
     ReadTimeoutError,
 )
 from mypy_boto3_s3.client import S3Client as Boto3S3Client
@@ -40,6 +49,26 @@ _HTTP_UNAUTHORIZED = 401
 _HTTP_FORBIDDEN = 403
 _HTTP_NOT_FOUND = 404
 _HTTP_SERVER_ERROR_MIN = 500
+DEFAULT_S3_CONNECT_TIMEOUT_SECONDS = 10.0
+DEFAULT_S3_READ_TIMEOUT_SECONDS = 120.0
+DEFAULT_S3_MAX_POOL_CONNECTIONS = 64
+
+_TRANSIENT_BOTOCORE_MARKERS = (
+    "connection",
+    "connection was closed",
+    "could not connect",
+    "endpoint",
+    "read timeout",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "throttl",
+    "slowdown",
+    "500",
+    "502",
+    "503",
+    "504",
+)
 
 
 class S3Client:
@@ -57,12 +86,19 @@ class S3Client:
         *,
         region: str | None = None,
         max_attempts: int = 5,
+        connect_timeout_seconds: float = DEFAULT_S3_CONNECT_TIMEOUT_SECONDS,
+        read_timeout_seconds: float = DEFAULT_S3_READ_TIMEOUT_SECONDS,
+        max_pool_connections: int = DEFAULT_S3_MAX_POOL_CONNECTIONS,
         client: Boto3S3Client | None = None,
     ) -> None:
         self._bucket = bucket
         self._region = region
         retry_cfg = Config(
             retries={"max_attempts": max_attempts, "mode": "adaptive"},
+            connect_timeout=connect_timeout_seconds,
+            read_timeout=read_timeout_seconds,
+            max_pool_connections=max_pool_connections,
+            tcp_keepalive=True,
         )
         if client is None:
             # boto3-stubs declares the boto3.client overloads with
@@ -75,6 +111,7 @@ class S3Client:
                 config=retry_cfg,
             )
         self._client: Boto3S3Client = client
+        self._transfer_config = TransferConfig(max_concurrency=1, use_threads=False)
 
     @property
     def bucket(self) -> str:
@@ -99,6 +136,7 @@ class S3Client:
                 key,
                 ExtraArgs=extra_args or {},
                 Callback=callback,
+                Config=self._transfer_config,
             )
         except (
             EndpointConnectionError,
@@ -107,10 +145,14 @@ class S3Client:
             ConnectTimeoutError,
         ) as exc:
             raise RetryableError(f"S3 upload transient failure: {exc}") from exc
-        except NoCredentialsError as exc:
+        except _TRANSFER_ERRORS as exc:
+            _classify_boto_core_error(exc, "upload", key)
+        except _CREDENTIAL_ERRORS as exc:
             raise FatalConfigError(f"AWS credentials missing: {exc}") from exc
         except ClientError as exc:
             _classify_client_error(exc, key)
+        except BotoCoreError as exc:
+            _classify_boto_core_error(exc, "upload", key)
 
     def download_file(
         self,
@@ -125,6 +167,7 @@ class S3Client:
                 key,
                 str(local_path),
                 Callback=callback,
+                Config=self._transfer_config,
             )
         except (
             EndpointConnectionError,
@@ -133,10 +176,14 @@ class S3Client:
             ConnectTimeoutError,
         ) as exc:
             raise RetryableError(f"S3 download transient failure: {exc}") from exc
-        except NoCredentialsError as exc:
+        except _TRANSFER_ERRORS as exc:
+            _classify_boto_core_error(exc, "download", key)
+        except _CREDENTIAL_ERRORS as exc:
             raise FatalConfigError(f"AWS credentials missing: {exc}") from exc
         except ClientError as exc:
             _classify_client_error(exc, key)
+        except BotoCoreError as exc:
+            _classify_boto_core_error(exc, "download", key)
 
     def head_object(self, key: str) -> dict[str, Any] | None:
         """Return HEAD metadata or None when the object does not exist."""
@@ -154,8 +201,10 @@ class S3Client:
             ConnectTimeoutError,
         ) as exc:
             raise RetryableError(f"S3 head_object transient failure: {exc}") from exc
-        except NoCredentialsError as exc:
+        except _CREDENTIAL_ERRORS as exc:
             raise FatalConfigError(f"AWS credentials missing: {exc}") from exc
+        except BotoCoreError as exc:
+            _classify_boto_core_error(exc, "head_object", key)
 
     def delete_object(self, key: str) -> None:
         try:
@@ -167,10 +216,12 @@ class S3Client:
             ConnectTimeoutError,
         ) as exc:
             raise RetryableError(f"S3 delete transient failure: {exc}") from exc
-        except NoCredentialsError as exc:
+        except _CREDENTIAL_ERRORS as exc:
             raise FatalConfigError(f"AWS credentials missing: {exc}") from exc
         except ClientError as exc:
             _classify_client_error(exc, key)
+        except BotoCoreError as exc:
+            _classify_boto_core_error(exc, "delete", key)
 
     def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
         """Read up to ``max_bytes`` from an S3 object."""
@@ -192,10 +243,12 @@ class S3Client:
             ConnectTimeoutError,
         ) as exc:
             raise RetryableError(f"S3 get_object transient failure: {exc}") from exc
-        except NoCredentialsError as exc:
+        except _CREDENTIAL_ERRORS as exc:
             raise FatalConfigError(f"AWS credentials missing: {exc}") from exc
         except ClientError as exc:
             _classify_client_error(exc, key)
+        except BotoCoreError as exc:
+            _classify_boto_core_error(exc, "get_object", key)
 
     def list_objects(self, prefix: str) -> Iterator[dict[str, Any]]:
         """Yield S3 object metadata dicts under the given prefix."""
@@ -211,10 +264,12 @@ class S3Client:
             ConnectTimeoutError,
         ) as exc:
             raise RetryableError(f"S3 list transient failure: {exc}") from exc
-        except NoCredentialsError as exc:
+        except _CREDENTIAL_ERRORS as exc:
             raise FatalConfigError(f"AWS credentials missing: {exc}") from exc
         except ClientError as exc:
             _classify_client_error(exc, prefix)
+        except BotoCoreError as exc:
+            _classify_boto_core_error(exc, "list", prefix)
 
 
 def _status_from_client_error(exc: ClientError) -> int:
@@ -236,4 +291,36 @@ def _classify_client_error(exc: ClientError, key: str) -> Never:
     raise FatalAPIError(f"S3 client error on {key}: {exc}") from exc
 
 
-__all__ = ["S3Client"]
+_CREDENTIAL_ERRORS = (
+    NoCredentialsError,
+    PartialCredentialsError,
+    CredentialRetrievalError,
+)
+_TRANSFER_ERRORS = (
+    S3UploadFailedError,
+    S3TransferFailedError,
+    RetriesExceededError,
+)
+type _ClassifiedS3Error = (
+    BotoCoreError | S3UploadFailedError | S3TransferFailedError | RetriesExceededError
+)
+
+
+def _classify_boto_core_error(
+    exc: _ClassifiedS3Error,
+    operation: str,
+    key: str,
+) -> Never:
+    message = str(exc).lower()
+    if any(marker in message for marker in _TRANSIENT_BOTOCORE_MARKERS):
+        error = f"S3 {operation} transient failure on {key}: {exc}"
+        raise RetryableError(error) from exc
+    raise FatalAPIError(f"S3 {operation} failed on {key}: {exc}") from exc
+
+
+__all__ = [
+    "DEFAULT_S3_CONNECT_TIMEOUT_SECONDS",
+    "DEFAULT_S3_MAX_POOL_CONNECTIONS",
+    "DEFAULT_S3_READ_TIMEOUT_SECONDS",
+    "S3Client",
+]
