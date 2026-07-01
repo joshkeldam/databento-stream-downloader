@@ -24,7 +24,7 @@ dependencies = [
   "botocore==1.43.23",
   "databento==0.79.0",
   "databento-dbn==0.59.0",
-  "numpy==2.4.6",
+  "numpy==2.5.0",
   "pydantic==2.13.4",
   "pydantic-settings==2.14.1",
   "python-dotenv==1.2.2",
