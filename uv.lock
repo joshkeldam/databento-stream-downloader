@@ -141,15 +141,15 @@ wheels = [
 
 [[package]]
 name = "boto3-stubs"
-version = "1.43.23"
+version = "1.43.38"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore-stubs" },
     { name = "types-s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/53/5b/a3684a4518b2ca543a79ff5a57b22cb01bcdc7fa6d4031db5f51394fa09d/boto3_stubs-1.43.23.tar.gz", hash = "sha256:2c501e1b110ba1c2f69855687cd38caaf34321ab9107678df3803ec7835105a7", size = 103012, upload-time = "2026-06-04T21:04:56.233Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/8d/2b249f56bc7a5e90bf1d5f23b6f089fd762f65d7ad032b32e93e69eb1242/boto3_stubs-1.43.38.tar.gz", hash = "sha256:55701008fa910d60aa2a593aa307d121c85a91a892cb24182bcf8ec41f29a9f5", size = 102871, upload-time = "2026-06-30T21:06:24.181Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b8/f2/fdfa0d12b617a0b9989efd834f2cabbc402a2dd8ca38312e8c6d573e8ac3/boto3_stubs-1.43.23-py3-none-any.whl", hash = "sha256:d9c58716c8f09a5e45108cc5d32fc7d472f15a1413c652365832f28f578b9d2c", size = 70829, upload-time = "2026-06-04T21:04:50.435Z" },
+    { url = "https://files.pythonhosted.org/packages/44/ba/2c9c7153ebd3ada100f111bf7a2f16b1627ba94450a9c6edf9e6e26c5845/boto3_stubs-1.43.38-py3-none-any.whl", hash = "sha256:5d9c21e2b52d0c4077ee377f686fc965395a2d02534e1e3de0c7cb9c2f0ad6d4", size = 70763, upload-time = "2026-06-30T21:06:20.238Z" },
 ]
 
 [package.optional-dependencies]
@@ -491,7 +491,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "basedpyright", specifier = "==1.39.6" },
-    { name = "boto3-stubs", extras = ["s3"], specifier = "==1.43.23" },
+    { name = "boto3-stubs", extras = ["s3"], specifier = "==1.43.38" },
     { name = "hypothesis", specifier = "==6.155.1" },
     { name = "moto", extras = ["s3"], specifier = "==5.2.1" },
     { name = "pip-audit", specifier = "==2.10.0" },
@@ -945,7 +945,7 @@ name = "pip-system-certs"
 version = "5.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pip" },
+    { name = "pip", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7d/6a/563b05a4f6c9ddc205c98bb413e74221368efb98b8fb9cca96b578b8930c/pip_system_certs-5.3.tar.gz", hash = "sha256:19c8bf9957bcce7d69c4dbc2d0b2ef13de1984d53f50a59012e6dbbad0af67c6", size = 6395, upload-time = "2025-10-16T06:14:55.217Z" }
 wheels = [
